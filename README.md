@@ -1,0 +1,1 @@
+GeexMox Installer is a set of scripts to install and help managing a GeexMox node.
