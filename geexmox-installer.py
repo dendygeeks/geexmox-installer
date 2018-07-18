@@ -171,8 +171,14 @@ class VmNode:
         if self.config['bios'].value[0] == 'ovmf':
             if not self.config.get('efidisk', {}).get('0', None):
                 raise self.IncorrectConfig(self, 'missing EFI disk with OVMF bios selected')
-        if self.config.get('hostpci', {}) and self.config['bios'].value[0] != 'ovmf':
-            raise self.IncorrectConfig(self, 'Passing throught devices on non-OVMF bios is unsupported')
+
+        # check that if we're passing something thru we use OVMF and don't use ballooning
+        if self.config.get('hostpci', {}):
+            if self.config['bios'].value[0] != 'ovmf':
+                raise self.IncorrectConfig(self, 'Passing throught devices on non-OVMF bios is unsupported')
+            if self.config.get('balloon', None) and self.config['balloon'].value[0] != '0':
+                raise self.IncorrectConfig(self, 'Cannot enable memory ballooning when passing through PCI devices')
+
         # check that PCI passed through are driven by vfio
         for number, passthru_cfg in self.config.get('hostpci', {}).items():
             for item in passthru_cfg.value:
@@ -185,6 +191,7 @@ class VmNode:
                             if dev.driver != PciDevice.VFIO_DRIVER: 
                                 raise self.IncorrectConfig(self,
                                         'Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER))
+
         # check that if '-cpu' is present in 'args' it matches global 'cpu'
         if 'args' in self.config:
             cpu_index = self.config['args'].value.index('-cpu')
