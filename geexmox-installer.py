@@ -8,6 +8,11 @@ import re
 
 ROOT_EUID = 0
 
+BOLD_WEIGHT = '\x1b[1m'
+NORMAL_WEIGHT = '\x1b[21m'
+RED_COLOR = '\x1b[31m'
+DEFAULT_COLOR = '\x1b[39m'
+
 class CpuVendor:
     INTEL = 'intel'
     OTHER = 'other'
@@ -28,9 +33,12 @@ class PciDevice:
     USB_CONTROLLER = '0c03'
     VGA_CONTROLLER = '0300'
 
-    def __init__(self, slot, class_name, class_id, vendor_name, vendor_id, device_name, device_id):
-        self.slot, self.class_name, self.class_id, self.vendor_name, self.vendor_id, self.device_name, self.device_id = \
-                slot, class_name, class_id, vendor_name, vendor_id, device_name, device_id
+    def __init__(self, slot, class_name, class_id, vendor_name, vendor_id, device_name, device_id, driver, module):
+        self.slot, self.class_name, self.class_id = slot, class_name, class_id
+        self.vendor_name, self.vendor_id = vendor_name, vendor_id
+        self.device_name, self.device_id = device_name, device_id
+        self.driver, self.module = driver, module
+
         if slot.endswith('.0'):
             self.is_function = False
             self.slot = slot[:-2]
@@ -45,7 +53,8 @@ class PciDevice:
             class_name, class_id = cls.BRACKETS_HEX.match(dct['class']).groups()
         except ValueError:
             raise ValueError('incorrect pci dict')
-        return cls(dct['slot'], class_name, class_id.lower(), vendor_name, vendor_id.lower(), device_name, device_id.lower()) 
+        return cls(dct['slot'], class_name, class_id.lower(), vendor_name, vendor_id.lower(),
+                device_name, device_id.lower(), dct.get('driver', ''), dct.get('module', '')) 
 
     def __str__(self):
         subst = dict(self.__dict__)
@@ -62,17 +71,20 @@ class PciDeviceList:
 
     @classmethod
     def os_collect(cls):
-        pci = subprocess.check_output(['lspci', '-mm', '-nn'])
-        buf = StringIO.StringIO(pci)
-        pci_header = 'slot class vendor device rev svendor sdevice'.split()
+        pci = subprocess.check_output(['lspci', '-k', '-nn', '-vmm'])
+        item = {}
+        for line in pci.splitlines():
+            line = line.strip()
+            if not line:
+                if item:
+                    yield PciDevice.parse_pci_dict(item)
+                item = {}
+                continue
+            key, value = line.split(':', 1)
+            item[key.strip().lower()] = value.strip()
 
-        csv.register_dialect('lspci', cls.LspciDialect)
-        reader = csv.DictReader(buf, fieldnames=pci_header, dialect='lspci')
-        csv.unregister_dialect('lspci')
-
-        for item in reader:
+        if item:
             yield PciDevice.parse_pci_dict(item)
-
 
 class VmNode:
     STOPPED = 'stopped'
@@ -110,12 +122,15 @@ class VmNodeList:
 def print_devices():
     printed_devs = []
     def perform_grouping(label, predicate):
-        print label
+        print BOLD_WEIGHT + label + NORMAL_WEIGHT
         for dev in PciDeviceList.os_collect():
             if dev.is_function or not predicate(dev):
                 continue
-            printed_devs.append(dev)
-            print "%2d. %s" % (len(printed_devs), dev)
+            if dev.module:
+                printed_devs.append(dev)
+                print "%2d. %s" % (len(printed_devs), dev)
+            else:
+                print '%s    %s%s' % (RED_COLOR, dev, DEFAULT_COLOR)
         print
 
     perform_grouping("VGA CONTROLLERS (videocards)",
