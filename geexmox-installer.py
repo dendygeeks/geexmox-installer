@@ -36,6 +36,8 @@ class PciDevice:
     USB_CONTROLLER = '0c03'
     VGA_CONTROLLER = '0300'
 
+    VFIO_DRIVER = 'vfio-pci'
+
     def __init__(self, slot, class_name, class_id, vendor_name, vendor_id, device_name, device_id, driver, module):
         self.slot, self.class_name, self.class_id = slot, class_name, class_id
         self.vendor_name, self.vendor_id = vendor_name, vendor_id
@@ -68,12 +70,21 @@ class PciDevice:
 
         return '%(slot)s  %(class_str)s %(vendor_name)s [%(vendor_id)s:%(device_id)s]' % subst
 
+    def is_same_addr(self, slot):
+        addr = self.slot + ('.0' if self.is_function else '')
+        return addr.startswith(slot)
+
+    def can_passthru(self):
+        return bool(self.module)
+
 class PciDeviceList:
+    _cache = None
+
     class LspciDialect(csv.excel):
         delimiter = ' '
 
     @classmethod
-    def os_collect(cls):
+    def _os_collect(cls):
         pci = subprocess.check_output(['lspci', '-k', '-nn', '-vmm'])
         item = {}
         for line in pci.splitlines():
@@ -88,6 +99,14 @@ class PciDeviceList:
 
         if item:
             yield PciDevice.parse_pci_dict(item)
+
+    @classmethod
+    def os_collect(cls):
+        if not cls._cache:
+            cls._cache = list(cls._os_collect())
+        for item in cls._cache:
+            yield item
+
 
 class QemuConfigEntry:
     def __init__(self, value):
@@ -115,6 +134,7 @@ class VmNode:
     RUNNING = 'running'
 
     ENDING_DIGITS = re.compile(r'^(.*)(\d+)$')
+    PCI_SLOT_ADDR = re.compile(r'^\d+(:\d+(\.\d+)?)?')
 
     class IncorrectConfig(Exception):
         def __init__(self, vm_node, message):
@@ -151,6 +171,19 @@ class VmNode:
         if self.config['bios'].value[0] == 'ovmf':
             if not self.config.get('efidisk', {}).get('0', None):
                 raise self.IncorrectConfig(self, 'missing EFI disk with OVMF bios selected')
+        if self.config.get('hostpci', {}) and self.config['bios'].value[0] != 'ovmf':
+            raise self.IncorrectConfig(self, 'Passing throught devices on non-OVMF bios is unsupported')
+        # check that PCI passed through are driven by vfio
+        for number, passthru_cfg in self.config.get('hostpci', {}).items():
+            for item in passthru_cfg.value:
+                if self.PCI_SLOT_ADDR.match(item):
+                    for dev in PciDeviceList.os_collect():
+                        if dev.is_same_addr(item):
+                            if not dev.can_passthru():
+                                raise self.IncorrectConfig(self, 'Cannot pass through device at %s: not driven by kernel module' % item)
+                            if dev.driver != PciDevice.VFIO_DRIVER: 
+                                raise self.IncorrectConfig(self, 'Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER))
+
 
 class VmNodeList:
     class QmDialect(csv.excel):
@@ -176,7 +209,7 @@ def print_devices():
         for dev in PciDeviceList.os_collect():
             if dev.is_function or not predicate(dev):
                 continue
-            if dev.module:
+            if dev.can_passthru():
                 printed_devs.append(dev)
                 print "%2d. %s" % (len(printed_devs), dev)
             else:
