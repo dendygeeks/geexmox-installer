@@ -95,7 +95,7 @@ class QemuConfigEntry:
     def __str__(self):
         return str(self.value)
     def __repr__(self):
-        return self.__str__()
+        return repr(self.value)
 
 class QemuConfigArgs(QemuConfigEntry):
     def __init__(self, value):
@@ -115,6 +115,10 @@ class VmNode:
     RUNNING = 'running'
 
     ENDING_DIGITS = re.compile(r'^(.*)(\d+)$')
+
+    class IncorrectConfig(Exception):
+        def __init__(self, vm_node, message):
+            Exception.__init__(self, None, 'Incorrect config for %s node: %s' % (vm_node.vmid, message))
 
     def __init__(self, vmid, name, status, mem, bootdisk, pid):
         self.vmid, self.name, self.status, self.mem, self.bootdisk, self.pid = \
@@ -141,6 +145,12 @@ class VmNode:
                 self.config.setdefault(key, {})[number] = value
             else:
                 self.config[key] = value
+
+    def validate_config(self):
+        # check that OVMF bios has EFI disk
+        if self.config['bios'].value[0] == 'ovmf':
+            if not self.config.get('efidisk', {}).get('0', None):
+                raise self.IncorrectConfig(self, 'missing EFI disk with OVMF bios selected')
 
 class VmNodeList:
     class QmDialect(csv.excel):
@@ -195,6 +205,7 @@ if __name__ == '__main__':
         vm.parse_config()
         print vm
         pprint.pprint(vm.config)
+        vm.validate_config()
 
     print_devices()
 
