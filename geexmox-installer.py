@@ -180,9 +180,20 @@ class VmNode:
                     for dev in PciDeviceList.os_collect():
                         if dev.is_same_addr(item):
                             if not dev.can_passthru():
-                                raise self.IncorrectConfig(self, 'Cannot pass through device at %s: not driven by kernel module' % item)
+                                raise self.IncorrectConfig(self,
+                                        'Cannot pass through device at %s: not driven by kernel module' % item)
                             if dev.driver != PciDevice.VFIO_DRIVER: 
-                                raise self.IncorrectConfig(self, 'Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER))
+                                raise self.IncorrectConfig(self,
+                                        'Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER))
+        # check that if '-cpu' is present in 'args' it matches global 'cpu'
+        if 'args' in self.config:
+            cpu_index = self.config['args'].value.index('-cpu')
+            if cpu_index > 0:
+                if cpu_index + 1 >= len(self.config['args'].value):
+                    raise self.IncorrectConfig(self, 'Bad args line: %s' % self.config['args'])
+                if self.config['cpu'].value[0] not in self.config['args'].value[cpu_index + 1]:
+                    raise self.IncorrectConfig(self, 'CPU type in args conflicts with global CPU type')
+
 
 
 class VmNodeList:
