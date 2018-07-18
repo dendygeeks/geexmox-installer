@@ -15,7 +15,7 @@ class CpuVendor:
     MAPPING = {'GenuineIntel': INTEL}
     
     @classmethod
-    def read(cls):
+    def os_collect(cls):
         with open('/proc/cpuinfo') as f:
             for line in f:
                 if 'vendor_id' in line:
@@ -49,37 +49,95 @@ class PciDevice:
 
     def __str__(self):
         subst = dict(self.__dict__)
-        subst['class_str'] = ('%(class_name)s (%(class_id)s)' % self.__dict__).ljust(40)
+        subst['class_str'] = ('%(class_name)s (%(class_id)s) %(device_name)s' % self.__dict__).ljust(70)
         if self.device_name.lower() == 'device':
             subst['device_name'] = ''
+        subst['vendor_name'] = ('%(vendor_name)s' % self.__dict__).ljust(30)
 
-        return '%(slot)s [%(vendor_id)s:%(device_id)s] %(class_str)s %(vendor_name)s %(device_name)s' % subst
+        return '%(slot)s  %(class_str)s %(vendor_name)s [%(vendor_id)s:%(device_id)s]' % subst
 
 class PciDeviceList:
     class LspciDialect(csv.excel):
         delimiter = ' '
 
     @classmethod
-    def get(cls):
-        csv.register_dialect('lspci', cls.LspciDialect)
+    def os_collect(cls):
         pci = subprocess.check_output(['lspci', '-mm', '-nn'])
         buf = StringIO.StringIO(pci)
         pci_header = 'slot class vendor device rev svendor sdevice'.split()
+
+        csv.register_dialect('lspci', cls.LspciDialect)
         reader = csv.DictReader(buf, fieldnames=pci_header, dialect='lspci')
-        for item in reader:
-            yield PciDevice.parse_pci_dict(item)
         csv.unregister_dialect('lspci')
 
+        for item in reader:
+            yield PciDevice.parse_pci_dict(item)
+
+
+class VmNode:
+    STOPPED = 'stopped'
+    RUNNING = 'running'
+
+    def __init__(self, vmid, name, status, mem, bootdisk, pid):
+        self.vmid, self.name, self.status, self.mem, self.bootdisk, self.pid = \
+                vmid, name, status, mem, bootdisk, pid
+    
+    @classmethod
+    def parse_qmlist_dict(cls, dct):
+        return cls(dct['VMID'], dct['NAME'], dct['STATUS'], dct['MEM(MB)'], dct['BOOTDISK(GB)'], dct['PID']) 
+
+    def __str__(self):
+        subst = dict(self.__dict__)
+        return '%(vmid)s %(name)s %(status)s %(mem)s %(bootdisk)s %(pid)s' % subst
+
+class VmNodeList:
+    class QmDialect(csv.excel):
+        delimiter = ' '
+        skipinitialspace=True
+    
+    @classmethod
+    def os_collect(cls):
+        qm = subprocess.check_output(['qm', 'list'])
+        buf = StringIO.StringIO(qm)
+        
+        csv.register_dialect('qm', cls.QmDialect)
+        reader = csv.DictReader(buf, dialect='qm')
+        csv.unregister_dialect('qm')
+
+        for item in reader:
+            yield VmNode.parse_qmlist_dict(item)
+
+def print_devices():
+    printed_devs = []
+    def perform_grouping(label, predicate):
+        print label
+        for dev in PciDeviceList.os_collect():
+            if dev.is_function or not predicate(dev):
+                continue
+            printed_devs.append(dev)
+            print "%2d. %s" % (len(printed_devs), dev)
+        print
+
+    perform_grouping("VGA CONTROLLERS (videocards)",
+            lambda dev: dev.class_id == PciDevice.VGA_CONTROLLER)
+    perform_grouping("USB CONTROLLERS",
+            lambda dev: dev.class_id == PciDevice.USB_CONTROLLER)
+    perform_grouping("OTHER DEVICES",
+            lambda dev: dev.class_id not in (PciDevice.USB_CONTROLLER, PciDevice.VGA_CONTROLLER))
+    
+    return printed_devs
 
 if __name__ == '__main__':
-    if CpuVendor.read() != CpuVendor.INTEL:
+    if CpuVendor.os_collect() != CpuVendor.INTEL:
         sys.stderr.write('Non-Intel CPUs not fully supported by GeexMox. Pull requests are welcome! :)\n')
 
     if os.geteuid() != ROOT_EUID:
         sys.exit('%s must be run as root' % sys.argv[0])
 
     
-    for dev in PciDeviceList.get():
-        if dev.is_function:
-            continue
-        print dev
+
+    for vm in VmNodeList.os_collect():
+        print vm
+
+    print_devices()
+
