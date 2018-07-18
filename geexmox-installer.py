@@ -5,6 +5,9 @@ import csv
 import subprocess
 import StringIO
 import re
+import pprint
+import shlex
+import urllib
 
 ROOT_EUID = 0
 
@@ -86,13 +89,37 @@ class PciDeviceList:
         if item:
             yield PciDevice.parse_pci_dict(item)
 
+class QemuConfigEntry:
+    def __init__(self, value):
+        self.value = value.split(',')
+    def __str__(self):
+        return str(self.value)
+    def __repr__(self):
+        return self.__str__()
+
+class QemuConfigArgs(QemuConfigEntry):
+    def __init__(self, value):
+        self.value = shlex.split(value)
+
+class QemuConfigDescription(QemuConfigEntry):
+    def __init__(self, value):
+        self.value = urllib.unquote(value)
+
+QEMU_CONFIG_NAME_TO_VALUE = {
+    'args': QemuConfigArgs,
+    'description': QemuConfigDescription,
+}
+
 class VmNode:
     STOPPED = 'stopped'
     RUNNING = 'running'
 
+    ENDING_DIGITS = re.compile(r'^(.*)(\d+)$')
+
     def __init__(self, vmid, name, status, mem, bootdisk, pid):
         self.vmid, self.name, self.status, self.mem, self.bootdisk, self.pid = \
                 vmid, name, status, mem, bootdisk, pid
+        self.config = {}
     
     @classmethod
     def parse_qmlist_dict(cls, dct):
@@ -101,6 +128,19 @@ class VmNode:
     def __str__(self):
         subst = dict(self.__dict__)
         return '%(vmid)s %(name)s %(status)s %(mem)s %(bootdisk)s %(pid)s' % subst
+
+    def parse_config(self):
+        lines = subprocess.check_output(['qm', 'config', self.vmid]).splitlines()
+        for line in lines:
+            key, value = line.split(':', 1)
+            key = key.strip().lower()
+            value = QEMU_CONFIG_NAME_TO_VALUE.get(key, QemuConfigEntry)(value.strip()) 
+
+            if self.ENDING_DIGITS.match(key):
+                key, number = self.ENDING_DIGITS.match(key).groups()
+                self.config.setdefault(key, {})[number] = value
+            else:
+                self.config[key] = value
 
 class VmNodeList:
     class QmDialect(csv.excel):
@@ -144,7 +184,7 @@ def print_devices():
 
 if __name__ == '__main__':
     if CpuVendor.os_collect() != CpuVendor.INTEL:
-        sys.stderr.write('Non-Intel CPUs not fully supported by GeexMox. Pull requests are welcome! :)\n')
+        sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
 
     if os.geteuid() != ROOT_EUID:
         sys.exit('%s must be run as root' % sys.argv[0])
@@ -152,7 +192,9 @@ if __name__ == '__main__':
     
 
     for vm in VmNodeList.os_collect():
+        vm.parse_config()
         print vm
+        pprint.pprint(vm.config)
 
     print_devices()
 
