@@ -9,6 +9,7 @@ import pprint
 import shlex
 import urllib
 import contextlib
+import traceback
 
 ROOT_EUID = 0
 
@@ -308,22 +309,51 @@ def stage1():
     
     inject_geexmox_overrides() 
 
-    print 'Updating apt db...'
-    with PrintEscControl(DIMMED, RESET_DIMMED):
-        subprocess.check_call(['apt-get', 'update'])
-
+    # installing ProxMox by following official guide:
+    # https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_Stretch
     hostname = subprocess.check_output(['hostname']).strip()
     hostname_ip = subprocess.check_output(['hostname', '--ip-address']).strip()
     with open('/etc/hosts') as hosts:
         for line in hosts:
             line = line.split('#')[0].strip()
+            if not line:
+                continue
             if line.split()[0] == hostname_ip:
                 print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s is present in /etc/hosts' % \
                         {'b': BOLD, 'r': RESET_BOLD, 'h': hostname, 'ip': hostname_ip}
                 break
         else:
-            if prompt_yesno('Add local IP entry to /etc/hosts'):
-                pass
+            print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s not present in /etc/hosts' % \
+                    {'b': BOLD, 'r': RESET_BOLD, 'h': hostname, 'ip': hostname_ip}
+            print 'It should be there for ProxMox installation to succeed.'
+            if prompt_yesno('Add %s entry to /etc/hosts' % hostname):
+                with open('/etc/hosts', 'a+') as hosts:
+                    hosts.write('\n%(ip)s\t%(host)s\t\t# automagically added by %(prog)s\n' %
+                            {'ip': hostname_ip, 'host': hostname, 'prog': os.path.basename(sys.argv[0])})
+
+    print 'Adding ProxMox repo and key...'
+    with open('/etc/apt/sources.list.d/pve-install-repo.list', 'w') as pve:
+        pve.write('deb [arch=amd64] http://download.proxmox.com/debian/pve stretch pve-no-subscription\n')
+    download('http://download.proxmox.com/debian/proxmox-ve-release-5.x.gpg',
+            '/etc/apt/trusted.gpg.d/proxmox-ve-release-5.x.gpg')
+
+    print '\nUpdating apt db...'
+    with PrintEscControl(DIMMED, RESET_DIMMED):
+        subprocess.check_call(['apt-get', 'update'])
+    print
+    if prompt_yesno('ProxMox recommends dist-upgrade, perform now'):
+        print 'Upgrading distribution...'
+        with PrintEscControl(DIMMED, RESET_DIMMED):
+            subprocess.check_call(['apt-get', 'dist-upgrade', '-y'])
+
+    print '\nInstalling ProxMox...'
+    with PrintEscControl(DIMMED, RESET_DIMMED):
+        subprocess.check_call(['apt-get', 'install', '-y', 'proxmox-ve', 'open-iscsi'])
+    print
+    if prompt_yesno('ProxMox recommends installing postfix, install'):
+        with PrintEscControl(DIMMED, RESET_DIMMED):
+            subprocess.check_call(['apt-get', 'install', '-y', 'postfix'])
+    print
 
     print_devices()
 
@@ -331,6 +361,8 @@ if __name__ == '__main__':
     try:
         if os.geteuid() != ROOT_EUID:
             sys.exit('%s must be run as root' % sys.argv[0])
+        if subprocess.check_output(['arch']).strip() != 'x86_64':
+            sys.exit('%s can only work on x86_64 OS' % sys.argv[0])
 
         #for vm in VmNodeList.os_collect():
             #vm.parse_config()
@@ -342,6 +374,8 @@ if __name__ == '__main__':
         print LIGHT_RED_COLOR
         print BOLD + "Fatal error occured:" + RESET_BOLD
         print e
+        if '--debug' in sys.argv:
+            traceback.print_exc()
         print DEFAULT_COLOR
         
 
