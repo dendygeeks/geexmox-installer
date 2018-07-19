@@ -128,7 +128,7 @@ class PciDeviceList:
                 item = {}
                 continue
             key, value = line.split(':', 1)
-            item[key.strip().lower()] = value.strip()
+            item[key.strip().lower()] = (item.get(key.strip().lower(), '') + ' ' + value.strip()).strip()
 
         if item:
             yield PciDevice.parse_pci_dict(item)
@@ -287,28 +287,38 @@ def download(url, target):
     except IOError:
         raise IOError("Can't download the file %s as %s" % (url, target))
 
-def inject_geexmox_overrides():
-    for url, target in APT_CONFIGS:
-        download(url, target)
-
-def prompt_yesno(msg, yes_default=True):
-    prompt = '%s? [%s] ' % (msg, 'Y/n' if yes_default else 'y/N')
+def prompt_yesno(msg, default_answer=True):
+    prompt = '%s? [%s] ' % (msg, 'Y/n' if default_answer else 'y/N')
     with PrintEscControl(BOLD, RESET_BOLD):
         while True:
             ans = raw_input(prompt).strip().lower()
             if not ans:
-                return yes_default
+                return default_answer
             if ans in ('y', 'yes'):
                 return True
             if ans in ('n', 'no'):
                 return False
 
-def stage1():
-    if CpuVendor.os_collect() != CpuVendor.INTEL:
-        sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
-    
-    inject_geexmox_overrides() 
+def prompt_comma_list(msg, min_val, max_val):
+    with PrintEscControl(BOLD, RESET_BOLD):
+        while True:
+            ans = raw_input(msg).strip().split(',')
+            try:
+                result = [int(e.strip()) for e in ans if e.strip()]
+                for e in result:
+                    if e < min_val or e > max_val:
+                        raise ValueError()
+            except ValueError:
+                with PrintEscControl(RED_COLOR, DEFAULT_COLOR):
+                    print 'Incorrect input: enter comma-separated list of indices from %s to %s\n' % (min_val, max_val)
+                continue
+            return result
 
+def inject_geexmox_overrides():
+    for url, target in APT_CONFIGS:
+        download(url, target)
+
+def install_proxmox():
     # installing ProxMox by following official guide:
     # https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_Stretch
     hostname = subprocess.check_output(['hostname']).strip()
@@ -350,12 +360,54 @@ def stage1():
     with PrintEscControl(DIMMED, RESET_DIMMED):
         subprocess.check_call(['apt-get', 'install', '-y', 'proxmox-ve', 'open-iscsi'])
     print
-    if prompt_yesno('ProxMox recommends installing postfix, install'):
+    if prompt_yesno('ProxMox recommends installing postfix, install', default_answer=False):
         with PrintEscControl(DIMMED, RESET_DIMMED):
             subprocess.check_call(['apt-get', 'install', '-y', 'postfix'])
     print
 
-    print_devices()
+def stage1():
+    if CpuVendor.os_collect() != CpuVendor.INTEL:
+        sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
+    
+    inject_geexmox_overrides() 
+    install_proxmox()
+
+    with PrintEscControl(BOLD, RESET_BOLD):
+        msg = 'PCI devices present:'
+        print '%s\n%s\n' % (msg, '=' * len(msg))
+
+    devices = print_devices()
+
+    while True:
+        passthru = prompt_comma_list('Input comma-separated list of devices to enable passthrough for: ', 1, len(devices))
+        if passthru:
+            with PrintEscControl(BOLD, RESET_BOLD):
+                print '\nDevices selected for passing through:'
+            for idx in passthru:
+                print devices[idx + 1]
+        else:
+            with PrintEscControl(BOLD, RESET_BOLD):
+                print '\nNo devices selected for passing through'
+        print
+        if prompt_yesno('Is it correct'):
+            break
+
+    if passthru:
+        print 'Ensuring VFIO drivers are enabled'
+        vfio_drivers = {key: False for key in 'vfio vfio_iommu_type1 vfio_pci vfio_virqfd'.split()}
+        with open('/etc/modules') as modules:
+            for line in modules:
+                line = line.split('#')[0].strip()
+                if not line:
+                    continue
+                if line in vfio_drivers:
+                    vfio_drivers[line] = True
+        if not all(vfio_drivers.values()):
+            with open('/etc/modules', 'a+') as modules:
+                modules.write('# automagically added by %s\n' % os.path.basename(sys.argv[0]))
+                for driver, is_present in vfio_drivers.items():
+                    if not is_present:
+                        modules.write('%s\n' % driver)
 
 if __name__ == '__main__':
     try:
