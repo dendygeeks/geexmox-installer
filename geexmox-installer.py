@@ -8,13 +8,42 @@ import re
 import pprint
 import shlex
 import urllib
+import contextlib
 
 ROOT_EUID = 0
 
-BOLD_WEIGHT = '\x1b[1m'
-NORMAL_WEIGHT = '\x1b[21m'
+# Console ESC flags
+BOLD = '\x1b[1m'
+DIMMED = '\x1b[2m'
+# Reset console ESC flags
+RESET_BOLD = '\x1b[21m'
+RESET_DIMMED = '\x1b[22m'
+
+# Console ESC colors
 RED_COLOR = '\x1b[31m'
+LIGHT_RED_COLOR = '\x1b[91m'
 DEFAULT_COLOR = '\x1b[39m'
+
+
+APT_CONFIGS = [
+    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/preferences.d/geexmox', '/etc/apt/preferences.d/geexmox'),
+    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/sources.list.d/geexmox.list', '/etc/apt/sources.list.d/geexmox.list')
+]
+
+class PrintEscControl:
+    @staticmethod
+    def __switch_color(color):
+        for handle in (sys.stdout, sys.stderr):
+            handle.write(color)
+            handle.flush()
+
+    def __init__(self, begin_seq, end_seq):
+        self.begin_seq, self.end_seq = begin_seq, end_seq
+
+    def __enter__(self, *a, **kw):
+        self.__switch_color(self.begin_seq)
+    def __exit__(self, *a, **kw):
+        self.__switch_color(self.end_seq)
 
 class CpuVendor:
     INTEL = 'intel'
@@ -71,11 +100,14 @@ class PciDevice:
         return '%(slot)s  %(class_str)s %(vendor_name)s [%(vendor_id)s:%(device_id)s]' % subst
 
     def is_same_addr(self, slot):
-        addr = self.slot + ('.0' if self.is_function else '')
+        addr = self.slot + ('.0' if not self.is_function else '')
         return addr.startswith(slot)
 
     def can_passthru(self):
         return bool(self.module)
+
+    def is_driven_by_vfio(self):
+        return self.driver == self.VFIO_DRIVER
 
 class PciDeviceList:
     _cache = None
@@ -136,7 +168,7 @@ class VmNode:
     ENDING_DIGITS = re.compile(r'^(.*)(\d+)$')
     PCI_SLOT_ADDR = re.compile(r'^\d+(:\d+(\.\d+)?)?')
 
-    class IncorrectConfig(Exception):
+    class IncorrectConfigException(Exception):
         def __init__(self, vm_node, message):
             Exception.__init__(self, None, 'Incorrect config for %s node: %s' % (vm_node.vmid, message))
 
@@ -170,14 +202,16 @@ class VmNode:
         # check that OVMF bios has EFI disk
         if self.config['bios'].value[0] == 'ovmf':
             if not self.config.get('efidisk', {}).get('0', None):
-                raise self.IncorrectConfig(self, 'missing EFI disk with OVMF bios selected')
+                raise self.IncorrectConfigException(self, 'Missing EFI disk with OVMF bios selected')
 
         # check that if we're passing something thru we use OVMF and don't use ballooning
         if self.config.get('hostpci', {}):
             if self.config['bios'].value[0] != 'ovmf':
-                raise self.IncorrectConfig(self, 'Passing throught devices on non-OVMF bios is unsupported')
+                raise self.IncorrectConfigException(self, 'Passing throught devices on non-OVMF bios is unsupported')
             if self.config.get('balloon', None) and self.config['balloon'].value[0] != '0':
-                raise self.IncorrectConfig(self, 'Cannot enable memory ballooning when passing through PCI devices')
+                raise self.IncorrectConfigException(self, 'Cannot enable memory ballooning when passing through PCI devices')
+            if len(self.config['hostpci']) > 4:
+                raise self.IncorrectConfigException(self, 'Cannot have more than 4 PCI devices passed through')
 
         # check that PCI passed through are driven by vfio
         for number, passthru_cfg in self.config.get('hostpci', {}).items():
@@ -186,10 +220,10 @@ class VmNode:
                     for dev in PciDeviceList.os_collect():
                         if dev.is_same_addr(item):
                             if not dev.can_passthru():
-                                raise self.IncorrectConfig(self,
-                                        'Cannot pass through device at %s: not driven by kernel module' % item)
-                            if dev.driver != PciDevice.VFIO_DRIVER: 
-                                raise self.IncorrectConfig(self,
+                                raise self.IncorrectConfigException(self,
+                                        'Cannot pass through device at %s: not driven by a kernel module' % item)
+                            if not dev.is_driven_by_vfio(): 
+                                raise self.IncorrectConfigException(self,
                                         'Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER))
 
         # check that if '-cpu' is present in 'args' it matches global 'cpu'
@@ -197,9 +231,9 @@ class VmNode:
             cpu_index = self.config['args'].value.index('-cpu')
             if cpu_index > 0:
                 if cpu_index + 1 >= len(self.config['args'].value):
-                    raise self.IncorrectConfig(self, 'Bad args line: %s' % self.config['args'])
+                    raise self.IncorrectConfigException(self, 'No cpu value present for -cpu argument: %s' % self.config['args'])
                 if self.config['cpu'].value[0] not in self.config['args'].value[cpu_index + 1]:
-                    raise self.IncorrectConfig(self, 'CPU type in args conflicts with global CPU type')
+                    raise self.IncorrectConfigException(self, 'CPU type in args differs from global CPU type')
 
 
 
@@ -223,7 +257,7 @@ class VmNodeList:
 def print_devices():
     printed_devs = []
     def perform_grouping(label, predicate):
-        print BOLD_WEIGHT + label + NORMAL_WEIGHT
+        print BOLD + label + RESET_BOLD
         for dev in PciDeviceList.os_collect():
             if dev.is_function or not predicate(dev):
                 continue
@@ -243,20 +277,71 @@ def print_devices():
     
     return printed_devs
 
-if __name__ == '__main__':
+def download(url, target):
+    print 'Downloading %s as %s' % (url, target)
+    try:
+        with contextlib.closing(urllib.urlopen(url)) as page:
+            with open(target, 'wb') as f:
+                f.write(page.read())
+    except IOError:
+        raise IOError("Can't download the file %s as %s" % (url, target))
+
+def inject_geexmox_overrides():
+    for url, target in APT_CONFIGS:
+        download(url, target)
+
+def prompt_yesno(msg, yes_default=True):
+    prompt = '%s? [%s] ' % (msg, 'Y/n' if yes_default else 'y/N')
+    with PrintEscControl(BOLD, RESET_BOLD):
+        while True:
+            ans = raw_input(prompt).strip().lower()
+            if not ans:
+                return yes_default
+            if ans in ('y', 'yes'):
+                return True
+            if ans in ('n', 'no'):
+                return False
+
+def stage1():
     if CpuVendor.os_collect() != CpuVendor.INTEL:
         sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
-
-    if os.geteuid() != ROOT_EUID:
-        sys.exit('%s must be run as root' % sys.argv[0])
-
     
+    inject_geexmox_overrides() 
 
-    for vm in VmNodeList.os_collect():
-        vm.parse_config()
-        print vm
-        pprint.pprint(vm.config)
-        vm.validate_config()
+    print 'Updating apt db...'
+    with PrintEscControl(DIMMED, RESET_DIMMED):
+        subprocess.check_call(['apt-get', 'update'])
+
+    hostname = subprocess.check_output(['hostname']).strip()
+    hostname_ip = subprocess.check_output(['hostname', '--ip-address']).strip()
+    with open('/etc/hosts') as hosts:
+        for line in hosts:
+            line = line.split('#')[0].strip()
+            if line.split()[0] == hostname_ip:
+                print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s is present in /etc/hosts' % \
+                        {'b': BOLD, 'r': RESET_BOLD, 'h': hostname, 'ip': hostname_ip}
+                break
+        else:
+            if prompt_yesno('Add local IP entry to /etc/hosts'):
+                pass
 
     print_devices()
+
+if __name__ == '__main__':
+    try:
+        if os.geteuid() != ROOT_EUID:
+            sys.exit('%s must be run as root' % sys.argv[0])
+
+        #for vm in VmNodeList.os_collect():
+            #vm.parse_config()
+            #print vm
+            #pprint.pprint(vm.config)
+            #vm.validate_config()
+        stage1()
+    except Exception as e:
+        print LIGHT_RED_COLOR
+        print BOLD + "Fatal error occured:" + RESET_BOLD
+        print e
+        print DEFAULT_COLOR
+        
 
