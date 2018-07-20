@@ -142,6 +142,14 @@ class PciDeviceList:
         for item in cls._cache:
             yield item
 
+    @classmethod
+    def get_functions(cls, device):
+        slot_no_function = device.slot.split('.')[0]
+        result = []
+        for dev in cls.os_collect():
+            if dev.is_function and dev.is_same_addr(slot_no_function):
+                result.append(dev)
+        return result
 
 class QemuConfigEntry:
     def __init__(self, value):
@@ -411,6 +419,67 @@ def install_proxmox():
     if no_enterprise:
         disable_pve_enterprise(verbose=False)
 
+def ensure_vfio(devices):
+    print 'Ensuring VFIO drivers are enabled'
+    vfio_drivers = {key: False for key in 'vfio vfio_iommu_type1 vfio_pci vfio_virqfd'.split()}
+    with open('/etc/modules') as modules:
+        for line in modules:
+            line = line.split('#')[0].strip()
+            if not line:
+                continue
+            if line in vfio_drivers:
+                vfio_drivers[line] = True
+    if not all(vfio_drivers.values()):
+        with open('/etc/modules', 'a+') as modules:
+            modules.write('# automagically added by %s\n' % os.path.basename(sys.argv[0]))
+            for driver, is_present in vfio_drivers.items():
+                if not is_present:
+                    modules.write('%s\n' % driver)
+
+    modprobe_cfg = [
+            ('options vfio_iommu_type1', 'allow_unsafe_interrupts=1'),
+            ('options kvm', 'ignore_msrs=Y'),
+    ]
+    device_modules = set()
+    device_ids = []
+    for dev in devices:
+        for module in dev.module.split():
+            device_modules.add(module)
+        device_ids.append('%s:%s' % (dev.vendor_id, dev.device_id))
+
+    modprobe_cfg.append(('softdep vfio_pci', ' '.join(['post:'] + sorted(device_modules))))
+    modprobe_cfg.append(('options vfio-pci', 'ids=%s' % ','.join(sorted(device_ids))))
+
+    not_found = []
+    for starter, value in modprobe_cfg:
+        found_starter = False
+        for fname in glob.glob('/etc/modprobe.d/*.conf'):
+            content, do_patch = [], False 
+            with open(fname) as f:
+                for line in f:
+                    no_comment = line.split('#')[0].strip()
+                    if no_comment.startswith(starter):
+                        if no_comment[len(starter):].strip() != value:
+                            with PrintEscControl(YELLOW_COLOR, DEFAULT_COLOR):
+                                print 'Commenting out "%s" in %s' % (line.strip(), fname)
+                            do_patch = True
+                            content.append('# %s #-- commented by %s\n' % (line.rstrip(), os.path.basename(sys.argv[0])))
+                            continue
+                        print 'Required "%s %s" present in %s' % (starter, value, fname)
+                        found_starter = True
+                    content.append(line)
+            if do_patch:
+                with open(fname, 'w') as f:
+                    f.write('\n'.join(content))
+        if not found_starter:
+            not_found.append((starter, value))
+
+    if not_found:
+        with open('/etc/modprobe.d/geexmox.conf', 'a+') as f:
+            for starter, value in not_found:
+                print 'Writing "%s %s" to geexmox.conf' % (starter, value)
+                f.write('%s %s\n' % (starter, value))
+
 def stage1():
     if CpuVendor.os_collect() != CpuVendor.INTEL:
         sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
@@ -430,7 +499,7 @@ def stage1():
             with PrintEscControl(BOLD, RESET_BOLD):
                 print '\nDevices selected for passing through:'
             for idx in passthru:
-                print devices[idx + 1]
+                print devices[idx - 1]
         else:
             with PrintEscControl(BOLD, RESET_BOLD):
                 print '\nNo devices selected for passing through'
@@ -439,21 +508,13 @@ def stage1():
             break
 
     if passthru:
-        print 'Ensuring VFIO drivers are enabled'
-        vfio_drivers = {key: False for key in 'vfio vfio_iommu_type1 vfio_pci vfio_virqfd'.split()}
-        with open('/etc/modules') as modules:
-            for line in modules:
-                line = line.split('#')[0].strip()
-                if not line:
-                    continue
-                if line in vfio_drivers:
-                    vfio_drivers[line] = True
-        if not all(vfio_drivers.values()):
-            with open('/etc/modules', 'a+') as modules:
-                modules.write('# automagically added by %s\n' % os.path.basename(sys.argv[0]))
-                for driver, is_present in vfio_drivers.items():
-                    if not is_present:
-                        modules.write('%s\n' % driver)
+        pass_devices = [devices[idx - 1] for idx in passthru]
+        for parent_device in list(pass_devices):
+            pass_devices.extend(PciDeviceList.get_functions(parent_device))
+        ensure_vfio(pass_devices)
+        print '\nUpdating initramfs to apply vfio configuration...'
+        with PrintEscControl(DIMMED, RESET_DIMMED):
+            subprocess.check_call(['update-initramfs', '-u', '-k', 'all'])
 
 if __name__ == '__main__':
     try:
