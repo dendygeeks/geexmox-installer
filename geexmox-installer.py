@@ -324,6 +324,20 @@ def prompt_comma_list(msg, min_val, max_val):
                 continue
             return result
 
+def get_module_depends(modname):
+    try:
+        modinfo = subprocess.check_output(['modinfo', modname], stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as err:
+        if ('%s not found' % modname) in err.output:
+            return []
+        raise
+
+    for line in modinfo.splitlines():
+        if line.split(':')[0] == 'depends':
+            depends = line.split(':', 1)[1].strip()
+            return depends.split(',') if depends else []
+    return []
+
 def inject_geexmox_overrides():
     for url, target in APT_CONFIGS:
         download(url, target)
@@ -444,15 +458,25 @@ def ensure_vfio(devices):
     ]
     device_modules = set()
     device_ids = []
+    vfio_modules = set([PciDevice.VFIO_DRIVER] + get_module_depends(PciDevice.VFIO_DRIVER))
+
+    modules_to_walk = set()
     for dev in devices:
         for module in dev.module.split():
-            device_modules.add(module)
-        device_modules.add(dev.driver)
-        if PciDevice.VFIO_DRIVER in device_modules:
-            device_modules.remove(PciDevice.VFIO_DRIVER)
+            if module not in vfio_modules:
+                modules_to_walk.add(module)
         device_ids.append('%s:%s' % (dev.vendor_id, dev.device_id))
 
+    while modules_to_walk:
+        device_modules |= modules_to_walk
+        next_modules = set()
+        for module in modules_to_walk:
+            next_modules |= set(get_module_depends(module))
+        modules_to_walk = next_modules - device_modules
+
     modprobe_cfg.append(('softdep vfio-pci', ' '.join(['post:'] + sorted(device_modules))))
+    for module in sorted(device_modules):
+        modprobe_cfg.append(('softdep %s' % module, 'pre: vfio-pci'))
     modprobe_cfg.append(('options vfio-pci', 'ids=%s' % ','.join(sorted(device_ids))))
 
     not_found = []
@@ -525,19 +549,33 @@ def stage1():
             pass_devices.extend(PciDeviceList.get_functions(parent_device))
         ensure_vfio(pass_devices)
 
+def stage2():
+    print 'Nobody here'
+
 if __name__ == '__main__':
+    if '--help' in sys.argv or '-h' in sys.argv:
+        sys.exit('''Usage: %s [--debug] [--reconf]
+
+Configures given node as a GeexMox one.
+Starts installation if node is not running a ProxMox kernel.
+
+    --reconf: forces installation start
+    --debug:  shows error stacktraces
+    --help:   shows this text''' % sys.argv[0])
+
     try:
         if os.geteuid() != ROOT_EUID:
             sys.exit('%s must be run as root' % sys.argv[0])
         if subprocess.check_output(['arch']).strip() != 'x86_64':
             sys.exit('%s can only work on x86_64 OS' % sys.argv[0])
 
-        #for vm in VmNodeList.os_collect():
-            #vm.parse_config()
-            #print vm
-            #pprint.pprint(vm.config)
-            #vm.validate_config()
-        stage1()
+        is_proxmox_kernel = subprocess.check_output(['uname', '-r']).strip().endswith('-pve')
+        if not is_proxmox_kernel or '--reconf' in sys.argv:
+            if is_proxmox_kernel:
+                print 'ProxMox kernel already running, but user requested reinstallation'
+            stage1()
+        else:
+            stage2()
     except Exception as e:
         print LIGHT_RED_COLOR
         print BOLD + "Fatal error occured:" + RESET_BOLD
