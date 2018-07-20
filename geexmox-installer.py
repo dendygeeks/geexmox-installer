@@ -10,6 +10,7 @@ import shlex
 import urllib
 import contextlib
 import traceback
+import glob
 
 ROOT_EUID = 0
 
@@ -23,6 +24,7 @@ RESET_DIMMED = '\x1b[22m'
 # Console ESC colors
 RED_COLOR = '\x1b[31m'
 LIGHT_RED_COLOR = '\x1b[91m'
+YELLOW_COLOR = '\x1b[33m'
 DEFAULT_COLOR = '\x1b[39m'
 
 
@@ -318,6 +320,44 @@ def inject_geexmox_overrides():
     for url, target in APT_CONFIGS:
         download(url, target)
 
+def disable_pve_enterprise(verbose=True):
+    for fname in glob.glob('/etc/apt/sources.list.d/*'):
+        with open(fname) as conf:
+            contents = conf.read().splitlines()
+        remove = False
+        for idx, line in enumerate(contents):
+            nocomment = line.split('#')[0].strip()
+            if 'https://enterprise.proxmox.com/debian/pve' in nocomment and 'pve-enterprise' in nocomment:
+                remove = True
+                contents[idx] = '# removed by %s: # %s' % (os.path.basename(sys.argv[0]), line)
+        if remove:
+            if verbose:
+                print 'Removing PVE Enterprise apt repo at %s...' % fname
+            with open(fname, 'w') as conf:
+                conf.write('\n'.join(contents))
+
+    libjs = r'/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js'
+    if verbose:
+        print 'Patching %s to remove nag...' % libjs
+    with open(libjs) as jsfile:
+        text = jsfile.read().splitlines()
+    for idx, line in enumerate(text):
+        if line.strip() == "if (data.status !== 'Active') {":
+            text[idx] = line.replace("data.status !== 'Active'", "false")
+            patched = True
+            break
+    else:
+        patched = False
+        if verbose:
+            with PrintEscControl(YELLOW_COLOR, DEFAULT_COLOR):
+                print 'Cannot find the nag, maybe already patched'
+    if patched:
+        with open(libjs, 'w') as jsfile:
+            jsfile.write('\n'.join(text))
+        if verbose:
+            print 'Patched out the nag'
+
+
 def install_proxmox():
     # installing ProxMox by following official guide:
     # https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_Stretch
@@ -346,6 +386,10 @@ def install_proxmox():
         pve.write('deb [arch=amd64] http://download.proxmox.com/debian/pve stretch pve-no-subscription\n')
     download('http://download.proxmox.com/debian/proxmox-ve-release-5.x.gpg',
             '/etc/apt/trusted.gpg.d/proxmox-ve-release-5.x.gpg')
+    
+    no_enterprise = prompt_yesno('Remove PVE Enterprise configs and nag warnings', default_answer=False)
+    if no_enterprise:
+        disable_pve_enterprise()
 
     print '\nUpdating apt db...'
     with PrintEscControl(DIMMED, RESET_DIMMED):
@@ -364,6 +408,8 @@ def install_proxmox():
         with PrintEscControl(DIMMED, RESET_DIMMED):
             subprocess.check_call(['apt-get', 'install', '-y', 'postfix'])
     print
+    if no_enterprise:
+        disable_pve_enterprise(verbose=False)
 
 def stage1():
     if CpuVendor.os_collect() != CpuVendor.INTEL:
