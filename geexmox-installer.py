@@ -420,11 +420,11 @@ def install_proxmox():
     if prompt_yesno('ProxMox recommends dist-upgrade, perform now'):
         print 'Upgrading distribution...'
         with PrintEscControl(DIMMED, RESET_DIMMED):
-            subprocess.check_call(['apt-get', 'dist-upgrade', '-y'])
+            subprocess.check_call(['apt-get', 'dist-upgrade', '-y', '--allow-unauthenticated', '--allow-downgrades'])
 
     print '\nInstalling ProxMox...'
     with PrintEscControl(DIMMED, RESET_DIMMED):
-        subprocess.check_call(['apt-get', 'install', '-y', 'proxmox-ve', 'open-iscsi'])
+        subprocess.check_call(['apt-get', 'install', '-y', '--allow-unauthenticated', '--allow-downgrades', 'proxmox-ve', 'open-iscsi'])
     print
     if prompt_yesno('ProxMox recommends installing postfix, install', default_answer=False):
         with PrintEscControl(DIMMED, RESET_DIMMED):
@@ -473,9 +473,10 @@ def ensure_vfio(devices):
         for module in modules_to_walk:
             next_modules |= set(get_module_depends(module))
         modules_to_walk = next_modules - device_modules
+    device_modules = [module.strip() for module in sorted(device_modules)]
 
-    modprobe_cfg.append(('softdep vfio-pci', ' '.join(['post:'] + sorted(device_modules))))
-    for module in sorted(device_modules):
+    modprobe_cfg.append(('softdep vfio-pci', ' '.join(['post:'] + device_modules)))
+    for module in device_modules:
         modprobe_cfg.append(('softdep %s' % module, 'pre: vfio-pci'))
     modprobe_cfg.append(('options vfio-pci', 'ids=%s' % ','.join(sorted(device_ids))))
 
@@ -487,8 +488,9 @@ def ensure_vfio(devices):
             with open(fname) as f:
                 for line in f:
                     no_comment = line.split('#')[0].strip()
-                    if no_comment.startswith(starter):
+                    if no_comment.startswith(starter + ' '):
                         if no_comment[len(starter):].strip() != value:
+                            import pdb;pdb.set_trace()
                             with PrintEscControl(YELLOW_COLOR, DEFAULT_COLOR):
                                 print 'Commenting out "%s" in %s' % (line.strip(), fname)
                             do_patch = True
@@ -516,9 +518,46 @@ def ensure_vfio(devices):
         with PrintEscControl(DIMMED, RESET_DIMMED):
             subprocess.check_call(['update-initramfs', '-u', '-k', 'all'])
 
+IOMMU_ENABLING = {
+    CpuVendor.INTEL: ['intel_iommu=on', 'video=efifb:off'],
+}
+GRUB_CMDLINE_RE = re.compile(r'(\s*GRUB_CMDLINE_LINUX_DEFAULT\s*=\s*")([^"]*)("\s*)')
+
+def enable_iommu(devices):
+    try:
+        kernel_params = IOMMU_ENABLING[CpuVendor.os_collect()]
+    except KeyError:
+        with PrintEscControl(RED_COLOR, DEFAULT_COLOR):
+            sys.stderr.write('%s does not know how to enable IOMMU on your CPU yet.\n' % os.path.basename(sys.argv[0]))
+        return
+    
+    grub_text = []
+    update_grub_config = False 
+    with open('/etc/default/grub') as grub_conf:
+        for line in grub_conf:
+            no_comment = line.split('#')[0].strip()
+            match = GRUB_CMDLINE_RE.match(no_comment)
+            if match:
+                args = shlex.split(match.group(2))
+                for extra_arg in kernel_params:
+                    if extra_arg not in args:
+                        update_grub_config = True
+                        args.append(extra_arg)
+                line = GRUB_CMDLINE_RE.sub(r'\1%s\3' % subprocess.list2cmdline(args), line)
+            grub_text.append(line)
+
+    if update_grub_config:
+        print 'Updating grub config...'
+        with open('/etc/default/grub', 'w') as grub_conf:
+            grub_conf.write(''.join(grub_text))
+        with PrintEscControl(DIMMED, RESET_DIMMED):
+            subprocess.check_call(['update-grub'])
+
+
 def stage1():
     if CpuVendor.os_collect() != CpuVendor.INTEL:
-        sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
+        with PrintEscControl(YELLOW_COLOR, DEFAULT_COLOR):
+           sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
     
     inject_geexmox_overrides() 
     install_proxmox()
@@ -548,6 +587,7 @@ def stage1():
         for parent_device in list(pass_devices):
             pass_devices.extend(PciDeviceList.get_functions(parent_device))
         ensure_vfio(pass_devices)
+        enable_iommu(pass_devices)
 
 def stage2():
     print 'Nobody here'
@@ -577,11 +617,10 @@ Starts installation if node is not running a ProxMox kernel.
         else:
             stage2()
     except Exception as e:
-        print LIGHT_RED_COLOR
-        print BOLD + "Fatal error occured:" + RESET_BOLD
-        print e
-        if '--debug' in sys.argv:
-            traceback.print_exc()
-        print DEFAULT_COLOR
-        
+        with PrintEscControl(LIGHT_RED_COLOR, DEFAULT_COLOR):
+            with PrintEscControl(BOLD, RESET_BOLD):
+                sys.stderr.write('\nFatal error occurred:\n')
+            sys.stderr.write('%s\n' % e)
+            if '--debug' in sys.argv:
+                traceback.print_exc()
 
