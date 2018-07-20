@@ -420,6 +420,7 @@ def install_proxmox():
         disable_pve_enterprise(verbose=False)
 
 def ensure_vfio(devices):
+    need_update_initramfs = False
     print 'Ensuring VFIO drivers are enabled'
     vfio_drivers = {key: False for key in 'vfio vfio_iommu_type1 vfio_pci vfio_virqfd'.split()}
     with open('/etc/modules') as modules:
@@ -434,6 +435,7 @@ def ensure_vfio(devices):
             modules.write('# automagically added by %s\n' % os.path.basename(sys.argv[0]))
             for driver, is_present in vfio_drivers.items():
                 if not is_present:
+                    need_update_initramfs = True
                     modules.write('%s\n' % driver)
 
     modprobe_cfg = [
@@ -445,9 +447,12 @@ def ensure_vfio(devices):
     for dev in devices:
         for module in dev.module.split():
             device_modules.add(module)
+        device_modules.add(dev.driver)
+        if PciDevice.VFIO_DRIVER in device_modules:
+            device_modules.remove(PciDevice.VFIO_DRIVER)
         device_ids.append('%s:%s' % (dev.vendor_id, dev.device_id))
 
-    modprobe_cfg.append(('softdep vfio_pci', ' '.join(['post:'] + sorted(device_modules))))
+    modprobe_cfg.append(('softdep vfio-pci', ' '.join(['post:'] + sorted(device_modules))))
     modprobe_cfg.append(('options vfio-pci', 'ids=%s' % ','.join(sorted(device_ids))))
 
     not_found = []
@@ -463,14 +468,15 @@ def ensure_vfio(devices):
                             with PrintEscControl(YELLOW_COLOR, DEFAULT_COLOR):
                                 print 'Commenting out "%s" in %s' % (line.strip(), fname)
                             do_patch = True
-                            content.append('# %s #-- commented by %s\n' % (line.rstrip(), os.path.basename(sys.argv[0])))
+                            need_update_initramfs = True
+                            content.append('# %s #-- commented by %s' % (line.rstrip(), os.path.basename(sys.argv[0])))
                             continue
                         print 'Required "%s %s" present in %s' % (starter, value, fname)
                         found_starter = True
-                    content.append(line)
+                    content.append(line.rstrip())
             if do_patch:
                 with open(fname, 'w') as f:
-                    f.write('\n'.join(content))
+                    f.write('\n'.join(content) + '\n')
         if not found_starter:
             not_found.append((starter, value))
 
@@ -479,6 +485,12 @@ def ensure_vfio(devices):
             for starter, value in not_found:
                 print 'Writing "%s %s" to geexmox.conf' % (starter, value)
                 f.write('%s %s\n' % (starter, value))
+        need_update_initramfs = True
+
+    if need_update_initramfs:
+        print '\nUpdating initramfs to apply vfio configuration...'
+        with PrintEscControl(DIMMED, RESET_DIMMED):
+            subprocess.check_call(['update-initramfs', '-u', '-k', 'all'])
 
 def stage1():
     if CpuVendor.os_collect() != CpuVendor.INTEL:
@@ -512,9 +524,6 @@ def stage1():
         for parent_device in list(pass_devices):
             pass_devices.extend(PciDeviceList.get_functions(parent_device))
         ensure_vfio(pass_devices)
-        print '\nUpdating initramfs to apply vfio configuration...'
-        with PrintEscControl(DIMMED, RESET_DIMMED):
-            subprocess.check_call(['update-initramfs', '-u', '-k', 'all'])
 
 if __name__ == '__main__':
     try:
