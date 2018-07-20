@@ -75,6 +75,7 @@ class PciDevice:
         self.vendor_name, self.vendor_id = vendor_name, vendor_id
         self.device_name, self.device_id = device_name, device_id
         self.driver, self.module = driver, module
+        self.full_slot = slot
 
         if slot.endswith('.0'):
             self.is_function = False
@@ -103,8 +104,7 @@ class PciDevice:
         return '%(slot)s  %(class_str)s %(vendor_name)s [%(vendor_id)s:%(device_id)s]' % subst
 
     def is_same_addr(self, slot):
-        addr = self.slot + ('.0' if not self.is_function else '')
-        return addr.startswith(slot)
+        return self.full_slot.startswith(slot)
 
     def can_passthru(self):
         return bool(self.module)
@@ -523,14 +523,7 @@ IOMMU_ENABLING = {
 }
 GRUB_CMDLINE_RE = re.compile(r'(\s*GRUB_CMDLINE_LINUX_DEFAULT\s*=\s*")([^"]*)("\s*)')
 
-def enable_iommu(devices):
-    try:
-        kernel_params = IOMMU_ENABLING[CpuVendor.os_collect()]
-    except KeyError:
-        with PrintEscControl(RED_COLOR, DEFAULT_COLOR):
-            sys.stderr.write('%s does not know how to enable IOMMU on your CPU yet.\n' % os.path.basename(sys.argv[0]))
-        return
-    
+def ensure_kernel_params_no_reboot(kernel_params):
     grub_text = []
     update_grub_config = False 
     with open('/etc/default/grub') as grub_conf:
@@ -552,7 +545,16 @@ def enable_iommu(devices):
             grub_conf.write(''.join(grub_text))
         with PrintEscControl(DIMMED, RESET_DIMMED):
             subprocess.check_call(['update-grub'])
+    return not update_grub_config
 
+def enable_iommu(devices):
+    try:
+        kernel_params = IOMMU_ENABLING[CpuVendor.os_collect()]
+    except KeyError:
+        with PrintEscControl(RED_COLOR, DEFAULT_COLOR):
+            sys.stderr.write('%s does not know how to enable IOMMU on your CPU yet.\n' % os.path.basename(sys.argv[0]))
+        return
+    ensure_kernel_params_no_reboot(kernel_params)
 
 def stage1():
     if CpuVendor.os_collect() != CpuVendor.INTEL:
@@ -589,8 +591,50 @@ def stage1():
         ensure_vfio(pass_devices)
         enable_iommu(pass_devices)
 
+    with PrintEscControl(BOLD + YELLOW_COLOR, RESET_BOLD + DEFAULT_COLOR):
+        print 'To continue with configuring VMs please reboot and re-run %s' % os.path.basename(sys.argv[0])
+
+def check_iommu_groups(devices):
+    iommu = {}
+    for device_path in glob.glob('/sys/kernel/iommu_groups/*/devices/*'):
+        group = device_path.split('/')[4]
+        device_addr = device_path.split('/')[-1]
+        if not device_addr.startswith('0000:'):
+            with PrintEscControl(RED_COLOR, DEFAULT_COLOR):
+                sys.stderr.write('Unsupported PCI configuration, more than one bus found')
+        iommu[device_addr[5:]] = group
+
+    group_devs = {}
+    for dev in devices:
+        if dev.is_function:
+            continue
+        group = iommu[dev.full_slot]
+        group_devs.setdefault(group, []).append(dev)
+    group_devs = {key: val for (key, val) in group_devs.items() if len(val) > 1}
+
+    if group_devs:
+        for group, devices in group_devs.items():
+            with PrintEscControl(BOLD, RESET_BOLD):
+                print 'IOMMU group %s:' % group
+            for dev in devices:
+                print dev
+        if prompt_yesno('Do you want to pass through devices from same group to different VMs'):
+            if not ensure_kernel_params_no_reboot(['pcie_acs_override=downstream,multifunction']):
+                with PrintEscControl(BOLD + YELLOW_COLOR, RESET_BOLD + DEFAULT_COLOR):
+                    print 'To continue with configuring VMs please reboot and re-run %s' % os.path.basename(sys.argv[0])
+                    sys.exit(0)
+
 def stage2():
-    print 'Nobody here'
+    passthru = [dev for dev in PciDeviceList.os_collect() if dev.is_driven_by_vfio()]
+    if passthru:
+        print 'Devices selected for passing through:'
+        for dev in passthru:
+            if dev.is_function:
+                continue
+            print dev
+        print 'If this list is not what you want, hit Ctrl-C and run "%s --reconf"' % os.path.basename(sys.argv[0])
+        check_iommu_groups(passthru)
+
 
 if __name__ == '__main__':
     if '--help' in sys.argv or '-h' in sys.argv:
