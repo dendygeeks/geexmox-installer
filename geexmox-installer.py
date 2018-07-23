@@ -419,20 +419,46 @@ def prompt_yesno(msg, default_answer=True):
             if ans in ('n', 'no'):
                 return False
 
-def prompt_comma_list(msg, min_val, max_val):
+class IncorrectInputException(Exception):
+    def __init__(self, msg):
+        self.msg = msg
+
+def prompt_predicate(msg, predicate):
     with PrintEscControl(BOLD):
         while True:
-            ans = raw_input(msg).strip().split(',')
             try:
-                result = [int(e.strip()) for e in ans if e.strip()]
-                for e in result:
-                    if e < min_val or e > max_val:
-                        raise ValueError()
-            except ValueError:
+                result = predicate(raw_input(msg))
+            except IncorrectInputException as err:
                 with PrintEscControl(RED_COLOR):
-                    print 'Incorrect input: enter comma-separated list of indices from %s to %s\n' % (min_val, max_val)
+                    print err.msg
                 continue
             return result
+
+def prompt_comma_list(msg, min_val, max_val):
+    def parse_comma_list(ans):
+        try:
+            ans = ans.strip().split(',')
+            result = [int(e.strip()) for e in ans if e.strip()]
+            for e in result:
+                if e < min_val or e > max_val:
+                    raise ValueError()
+        except ValueError:
+            raise IncorrectInputException(
+                    'Incorrect input: enter comma-separated list of values from %s to %s\n' % (min_val, max_val))
+        return result
+    return prompt_predicate(msg, parse_comma_list)
+
+def prompt_int(msg, min_val, max_val):
+    def parse_int(ans):
+        try:
+            result = int(ans.strip())
+            if result < min_val or result > max_val:
+                raise ValueError()
+        except ValueError:
+            raise IncorrectInputException(
+                    'Incorrect input: enter integer value from %s to %s\n' % (min_val, max_val))
+        return result
+    return prompt_predicate(msg, parse_int)
 
 def get_module_depends(modname):
     try:
@@ -729,6 +755,11 @@ def check_iommu_groups(devices):
                     print 'To continue with configuring VMs please reboot and re-run %s' % os.path.basename(sys.argv[0])
                     sys.exit(0)
 
+def select_devs_for_passthrough(vm):
+    print "Select devs"
+def enable_macos_support(vm):
+    print "Enable macos"
+
 def stage2():
     passthru = [dev for dev in PciDeviceList.os_collect() if dev.is_driven_by_vfio()]
     if passthru:
@@ -745,8 +776,9 @@ def stage2():
 
         check_iommu_groups(passthru)
 
-    print '\nValidating created VMs configurations...'
+    print
     vms = list(VmNodeList.os_collect())
+    print '\nValidating created VMs configurations...'
     for vm in vms:
         vm.parse_config()
 
@@ -769,7 +801,42 @@ def stage2():
     if have_to_stop:
         with PrintEscControl(BOLD):
             print '\nPlease fix issues above and re-run %s to continue configuring' % os.path.basename(sys.argv[0])
+            sys.exit(1)
 
+    while True:
+        print
+
+        with PrintEscControl(BOLD):
+            msg = 'Virtual Machines present:'
+            print '%s\n%s\n' % (msg, '=' * len(msg))
+
+        for index, vm in enumerate(vms):
+            print '%2d. %s' % (index+1, vm.name)
+
+        print
+
+
+        val = prompt_int('Enter the VM index to edit (0 - exit): ', 0, len(vms))
+        if val == 0:
+            break
+
+        vm = vms[val - 1]
+        while True:
+            with PrintEscControl(BOLD):
+                print "\nSelect an operation:"
+            print
+            ops = [
+                ("Select PCI devices for passing through", select_devs_for_passthrough),
+                ("Enable macOS support for the VM", enable_macos_support)
+            ]
+            for index, (op, _) in enumerate(ops):
+                print "%2d. %s" % (index+1, op)
+
+            print
+            opt = prompt_int('Select an option (0 - select another VM): ', 0, len(ops))
+            if opt == 0:
+                break
+            ops[opt - 1][1](vm)
 
 if __name__ == '__main__':
     if '--help' in sys.argv or '-h' in sys.argv:
@@ -795,6 +862,9 @@ Starts installation if node is not running a ProxMox kernel.
             stage1()
         else:
             stage2()
+    except KeyboardInterrupt:
+        with PrintEscControl(YELLOW_COLOR + BOLD):
+            print '\n\nCancelled by user'
     except Exception as e:
         with PrintEscControl(LIGHT_RED_COLOR):
             with PrintEscControl(BOLD):
