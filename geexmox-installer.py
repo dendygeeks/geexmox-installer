@@ -164,42 +164,128 @@ class PciDeviceList:
                 result.append(dev)
         return result
 
-class QemuConfigEntry:
-    def __init__(self, value):
-        self.value = value.split(',')
-    def __str__(self):
-        return str(self.value)
-    def __repr__(self):
-        return repr(self.value)
+class QemuConfig:
+    class QemuConfigEntry:
+        def __init__(self, value):
+            self.value = value.split(',')
+        def __str__(self):
+            return str(self.value)
+        def __repr__(self):
+            return repr(self.value)
 
-class QemuConfigArgs(QemuConfigEntry):
-    def __init__(self, value):
-        self.value = shlex.split(value)
+    class QemuConfigArgs(QemuConfigEntry):
+        def __init__(self, value):
+            self.value = shlex.split(value)
 
-class QemuConfigDescription(QemuConfigEntry):
-    def __init__(self, value):
-        self.value = urllib.unquote(value)
+    class QemuConfigDescription(QemuConfigEntry):
+        def __init__(self, value):
+            self.value = urllib.unquote(value)
 
-QEMU_CONFIG_NAME_TO_VALUE = {
-    'args': QemuConfigArgs,
-    'description': QemuConfigDescription,
-}
+    class QemuSubvalueWrapper:
+        def __init__(self):
+            self.__dict = {}
+        def __setitem__(self, key, value):
+            self.__dict[key] = value
+        def __getitem__(self, key):
+            return self.__dict[key].value
+        def get(self, key, default=None):
+            try:
+                result = self.__dict[name]
+            except KeyError:
+                return default
+            return result.value
+        def items(self):
+            for key, value in self.__dict.items():
+                yield key, value.value
+
+    QEMU_CONFIG_NAME_TO_VALUE = {
+        'args': QemuConfigArgs,
+        'description': QemuConfigDescription,
+    }
+    
+    ENDING_DIGITS = re.compile(r'^(.*)(\d+)$')
+    PCI_SLOT_ADDR = re.compile(r'^\d+(:\d+(\.\d+)?)?')
+
+    def __init__(self, vmid):
+        self.vmid = vmid
+        self.__config = {}
+    
+    def parse_line(self, line):
+        key, value = line.split(':', 1)
+        key = key.strip().lower()
+        line_class = self.QEMU_CONFIG_NAME_TO_VALUE.get(key, self.QemuConfigEntry)
+        value = line_class(value.strip()) 
+
+        if self.ENDING_DIGITS.match(key):
+            key, number = self.ENDING_DIGITS.match(key).groups()
+            self.__config.setdefault(key, self.QemuSubvalueWrapper())[number] = value
+        else:
+            self.__config[key] = value
+    
+    def __getitem__(self, name):
+        return self.__config[name].value
+
+    def get(self, name, default=None):
+        try:
+            result = self.__config[name]
+        except KeyError:
+            return default
+        return result.value
+
+    def validate(self):
+        # check that OVMF bios has EFI disk
+        issues = []
+        if self['bios'][0] == 'ovmf':
+            if not self.get('efidisk', {}).get('0', None):
+                issues.append(('Missing EFI disk with OVMF bios selected',
+                               'Please add EFI disk using ProxMox Hardware menu'))
+
+        # check that if we're passing something thru we use OVMF and don't use ballooning
+        if self.get('hostpci'):
+            if self['bios'][0] != 'ovmf':
+                issues.append(('Passing throught devices on non-OVMF bios is unsupported',
+                               'Switch BIOS to OVMF using ProxMox Options menu'))
+            if self.get('balloon') and self['balloon'][0] != '0':
+                issues.append(('Cannot enable memory ballooning when passing through PCI devices'
+                               'Disable memory ballooning using ProxMox Hardware menu'))
+            if len(self['hostpci']) > 4:
+                issues.append(('Cannot have more than 4 PCI devices passed through',
+                               'Pass fewer PCI devices'))
+
+        # check that PCI passed through are driven by vfio
+        for number, passthru_cfg in self.get('hostpci', {}).items():
+            for item in passthru_cfg:
+                if self.PCI_SLOT_ADDR.match(item):
+                    for dev in PciDeviceList.os_collect():
+                        if dev.is_same_addr(item):
+                            if not dev.can_passthru():
+                                issues.append(('Cannot pass through device at %s: not driven by a kernel module' % item,
+                                               'Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1])))
+                            if not dev.is_driven_by_vfio():
+                                issues.append(('Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER),
+                                               'Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1])))
+
+        # check that if '-cpu' is present in 'args' it matches global 'cpu'
+        if self.get('args'):
+            cpu_index = self['args'].index('-cpu')
+            if cpu_index > 0:
+                if cpu_index + 1 >= len(self['args']):
+                    issues.append(('No cpu value present for -cpu argument: %s' % self['args'],
+                                   'Please fix qemu config for %s vmid' % self.vmid))
+                if self['cpu'][0] not in self['args'][cpu_index + 1]:
+                    issues.append(('CPU type in args differs from global CPU type',
+                                  'Please select matching CPU type or fix -cpu argument'))
+
+        return issues
 
 class VmNode:
     STOPPED = 'stopped'
     RUNNING = 'running'
 
-    ENDING_DIGITS = re.compile(r'^(.*)(\d+)$')
-    PCI_SLOT_ADDR = re.compile(r'^\d+(:\d+(\.\d+)?)?')
-
-    class IncorrectConfigException(Exception):
-        def __init__(self, vm_node, message):
-            Exception.__init__(self, None, 'Incorrect config for %s node: %s' % (vm_node.vmid, message))
-
     def __init__(self, vmid, name, status, mem, bootdisk, pid):
         self.vmid, self.name, self.status, self.mem, self.bootdisk, self.pid = \
                 vmid, name, status, mem, bootdisk, pid
-        self.config = {}
+        self.config = QemuConfig(vmid)
     
     @classmethod
     def parse_qmlist_dict(cls, dct):
@@ -212,54 +298,7 @@ class VmNode:
     def parse_config(self):
         lines = subprocess.check_output(['qm', 'config', self.vmid]).splitlines()
         for line in lines:
-            key, value = line.split(':', 1)
-            key = key.strip().lower()
-            value = QEMU_CONFIG_NAME_TO_VALUE.get(key, QemuConfigEntry)(value.strip()) 
-
-            if self.ENDING_DIGITS.match(key):
-                key, number = self.ENDING_DIGITS.match(key).groups()
-                self.config.setdefault(key, {})[number] = value
-            else:
-                self.config[key] = value
-
-    def validate_config(self):
-        # check that OVMF bios has EFI disk
-        if self.config['bios'].value[0] == 'ovmf':
-            if not self.config.get('efidisk', {}).get('0', None):
-                raise self.IncorrectConfigException(self, 'Missing EFI disk with OVMF bios selected')
-
-        # check that if we're passing something thru we use OVMF and don't use ballooning
-        if self.config.get('hostpci', {}):
-            if self.config['bios'].value[0] != 'ovmf':
-                raise self.IncorrectConfigException(self, 'Passing throught devices on non-OVMF bios is unsupported')
-            if self.config.get('balloon', None) and self.config['balloon'].value[0] != '0':
-                raise self.IncorrectConfigException(self, 'Cannot enable memory ballooning when passing through PCI devices')
-            if len(self.config['hostpci']) > 4:
-                raise self.IncorrectConfigException(self, 'Cannot have more than 4 PCI devices passed through')
-
-        # check that PCI passed through are driven by vfio
-        for number, passthru_cfg in self.config.get('hostpci', {}).items():
-            for item in passthru_cfg.value:
-                if self.PCI_SLOT_ADDR.match(item):
-                    for dev in PciDeviceList.os_collect():
-                        if dev.is_same_addr(item):
-                            if not dev.can_passthru():
-                                raise self.IncorrectConfigException(self,
-                                        'Cannot pass through device at %s: not driven by a kernel module' % item)
-                            if not dev.is_driven_by_vfio(): 
-                                raise self.IncorrectConfigException(self,
-                                        'Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER))
-
-        # check that if '-cpu' is present in 'args' it matches global 'cpu'
-        if 'args' in self.config:
-            cpu_index = self.config['args'].value.index('-cpu')
-            if cpu_index > 0:
-                if cpu_index + 1 >= len(self.config['args'].value):
-                    raise self.IncorrectConfigException(self, 'No cpu value present for -cpu argument: %s' % self.config['args'])
-                if self.config['cpu'].value[0] not in self.config['args'].value[cpu_index + 1]:
-                    raise self.IncorrectConfigException(self, 'CPU type in args differs from global CPU type')
-
-
+            self.config.parse_line(line)
 
 class VmNodeList:
     class QmDialect(csv.excel):
@@ -647,6 +686,20 @@ def stage2():
             print dev
         print 'If this list is not what you want, hit Ctrl-C and run "%s --reconf"' % os.path.basename(sys.argv[0])
         check_iommu_groups(passthru)
+
+    print 'Validating created VMs configurations...'
+    vms = VmNodeList.os_collect()
+    for vm in vms:
+        vm.parse_config()
+        issues = vm.config.validate()
+        if not issues:
+            continue
+        with PrintEscControl(RED_COLOR):
+            print 'VM "%s" has configuration %s:' % (vm.name, 'issues' if len(issues) > 1 else 'issue')
+        for problem, solution in issues:
+            print problem + ':'
+            with PrintEscControl(BOLD):
+                print '\t%s.' % solution
 
 
 if __name__ == '__main__':
