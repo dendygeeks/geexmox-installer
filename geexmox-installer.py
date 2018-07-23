@@ -27,10 +27,19 @@ LIGHT_RED_COLOR = '\x1b[91m'
 YELLOW_COLOR = '\x1b[33m'
 DEFAULT_COLOR = '\x1b[39m'
 
+RESET_TABLE = {
+    RED_COLOR: DEFAULT_COLOR,
+    LIGHT_RED_COLOR: DEFAULT_COLOR,
+    YELLOW_COLOR: DEFAULT_COLOR,
+    BOLD: RESET_BOLD,
+    DIMMED: RESET_DIMMED,
+}
 
 APT_CONFIGS = [
-    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/preferences.d/geexmox', '/etc/apt/preferences.d/geexmox'),
-    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/sources.list.d/geexmox.list', '/etc/apt/sources.list.d/geexmox.list')
+    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/preferences.d/geexmox',
+     '/etc/apt/preferences.d/geexmox'),
+    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/sources.list.d/geexmox.list',
+     '/etc/apt/sources.list.d/geexmox.list')
 ]
 
 class PrintEscControl:
@@ -40,8 +49,12 @@ class PrintEscControl:
             handle.write(color)
             handle.flush()
 
-    def __init__(self, begin_seq, end_seq):
-        self.begin_seq, self.end_seq = begin_seq, end_seq
+    def __init__(self, begin_seq, end_seq=None):
+        self.begin_seq = begin_seq
+        if end_seq is not None:
+            self.end_seq = end_seq
+        else:
+            self.end_seq = ''.join(RESET_TABLE[ch] for ch in reversed(begin_seq))
 
     def __enter__(self, *a, **kw):
         self.__switch_color(self.begin_seq)
@@ -299,7 +312,7 @@ def download(url, target):
 
 def prompt_yesno(msg, default_answer=True):
     prompt = '%s? [%s] ' % (msg, 'Y/n' if default_answer else 'y/N')
-    with PrintEscControl(BOLD, RESET_BOLD):
+    with PrintEscControl(BOLD):
         while True:
             ans = raw_input(prompt).strip().lower()
             if not ans:
@@ -310,7 +323,7 @@ def prompt_yesno(msg, default_answer=True):
                 return False
 
 def prompt_comma_list(msg, min_val, max_val):
-    with PrintEscControl(BOLD, RESET_BOLD):
+    with PrintEscControl(BOLD):
         while True:
             ans = raw_input(msg).strip().split(',')
             try:
@@ -319,7 +332,7 @@ def prompt_comma_list(msg, min_val, max_val):
                     if e < min_val or e > max_val:
                         raise ValueError()
             except ValueError:
-                with PrintEscControl(RED_COLOR, DEFAULT_COLOR):
+                with PrintEscControl(RED_COLOR):
                     print 'Incorrect input: enter comma-separated list of indices from %s to %s\n' % (min_val, max_val)
                 continue
             return result
@@ -371,7 +384,7 @@ def disable_pve_enterprise(verbose=True):
     else:
         patched = False
         if verbose:
-            with PrintEscControl(YELLOW_COLOR, DEFAULT_COLOR):
+            with PrintEscControl(YELLOW_COLOR):
                 print 'Cannot find the nag, maybe already patched'
     if patched:
         with open(libjs, 'w') as jsfile:
@@ -414,20 +427,20 @@ def install_proxmox():
         disable_pve_enterprise()
 
     print '\nUpdating apt db...'
-    with PrintEscControl(DIMMED, RESET_DIMMED):
+    with PrintEscControl(DIMMED):
         subprocess.check_call(['apt-get', 'update'])
     print
     if prompt_yesno('ProxMox recommends dist-upgrade, perform now'):
         print 'Upgrading distribution...'
-        with PrintEscControl(DIMMED, RESET_DIMMED):
+        with PrintEscControl(DIMMED):
             subprocess.check_call(['apt-get', 'dist-upgrade', '-y', '--allow-unauthenticated', '--allow-downgrades'])
 
     print '\nInstalling ProxMox...'
-    with PrintEscControl(DIMMED, RESET_DIMMED):
+    with PrintEscControl(DIMMED):
         subprocess.check_call(['apt-get', 'install', '-y', '--allow-unauthenticated', '--allow-downgrades', 'proxmox-ve', 'open-iscsi'])
     print
     if prompt_yesno('ProxMox recommends installing postfix, install', default_answer=False):
-        with PrintEscControl(DIMMED, RESET_DIMMED):
+        with PrintEscControl(DIMMED):
             subprocess.check_call(['apt-get', 'install', '-y', 'postfix'])
     print
     if no_enterprise:
@@ -491,7 +504,7 @@ def ensure_vfio(devices):
                     if no_comment.startswith(starter + ' '):
                         if no_comment[len(starter):].strip() != value:
                             import pdb;pdb.set_trace()
-                            with PrintEscControl(YELLOW_COLOR, DEFAULT_COLOR):
+                            with PrintEscControl(YELLOW_COLOR):
                                 print 'Commenting out "%s" in %s' % (line.strip(), fname)
                             do_patch = True
                             need_update_initramfs = True
@@ -515,7 +528,7 @@ def ensure_vfio(devices):
 
     if need_update_initramfs:
         print '\nUpdating initramfs to apply vfio configuration...'
-        with PrintEscControl(DIMMED, RESET_DIMMED):
+        with PrintEscControl(DIMMED):
             subprocess.check_call(['update-initramfs', '-u', '-k', 'all'])
 
 IOMMU_ENABLING = {
@@ -543,7 +556,7 @@ def ensure_kernel_params_no_reboot(kernel_params):
         print 'Updating grub config...'
         with open('/etc/default/grub', 'w') as grub_conf:
             grub_conf.write(''.join(grub_text))
-        with PrintEscControl(DIMMED, RESET_DIMMED):
+        with PrintEscControl(DIMMED):
             subprocess.check_call(['update-grub'])
     return not update_grub_config
 
@@ -551,20 +564,20 @@ def enable_iommu(devices):
     try:
         kernel_params = IOMMU_ENABLING[CpuVendor.os_collect()]
     except KeyError:
-        with PrintEscControl(RED_COLOR, DEFAULT_COLOR):
+        with PrintEscControl(RED_COLOR):
             sys.stderr.write('%s does not know how to enable IOMMU on your CPU yet.\n' % os.path.basename(sys.argv[0]))
         return
     ensure_kernel_params_no_reboot(kernel_params)
 
 def stage1():
     if CpuVendor.os_collect() != CpuVendor.INTEL:
-        with PrintEscControl(YELLOW_COLOR, DEFAULT_COLOR):
+        with PrintEscControl(YELLOW_COLOR):
            sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
     
     inject_geexmox_overrides() 
     install_proxmox()
 
-    with PrintEscControl(BOLD, RESET_BOLD):
+    with PrintEscControl(BOLD):
         msg = 'PCI devices present:'
         print '%s\n%s\n' % (msg, '=' * len(msg))
 
@@ -573,12 +586,12 @@ def stage1():
     while True:
         passthru = prompt_comma_list('Input comma-separated list of devices to enable passthrough for: ', 1, len(devices))
         if passthru:
-            with PrintEscControl(BOLD, RESET_BOLD):
+            with PrintEscControl(BOLD):
                 print '\nDevices selected for passing through:'
             for idx in passthru:
                 print devices[idx - 1]
         else:
-            with PrintEscControl(BOLD, RESET_BOLD):
+            with PrintEscControl(BOLD):
                 print '\nNo devices selected for passing through'
         print
         if prompt_yesno('Is it correct'):
@@ -591,7 +604,7 @@ def stage1():
         ensure_vfio(pass_devices)
         enable_iommu(pass_devices)
 
-    with PrintEscControl(BOLD + YELLOW_COLOR, RESET_BOLD + DEFAULT_COLOR):
+    with PrintEscControl(BOLD + YELLOW_COLOR):
         print 'To continue with configuring VMs please reboot and re-run %s' % os.path.basename(sys.argv[0])
 
 def check_iommu_groups(devices):
@@ -600,7 +613,7 @@ def check_iommu_groups(devices):
         group = device_path.split('/')[4]
         device_addr = device_path.split('/')[-1]
         if not device_addr.startswith('0000:'):
-            with PrintEscControl(RED_COLOR, DEFAULT_COLOR):
+            with PrintEscControl(RED_COLOR):
                 sys.stderr.write('Unsupported PCI configuration, more than one bus found')
         iommu[device_addr[5:]] = group
 
@@ -614,13 +627,13 @@ def check_iommu_groups(devices):
 
     if group_devs:
         for group, devices in group_devs.items():
-            with PrintEscControl(BOLD, RESET_BOLD):
+            with PrintEscControl(BOLD):
                 print 'IOMMU group %s:' % group
             for dev in devices:
                 print dev
         if prompt_yesno('Do you want to pass through devices from same group to different VMs'):
             if not ensure_kernel_params_no_reboot(['pcie_acs_override=downstream,multifunction']):
-                with PrintEscControl(BOLD + YELLOW_COLOR, RESET_BOLD + DEFAULT_COLOR):
+                with PrintEscControl(BOLD + YELLOW_COLOR):
                     print 'To continue with configuring VMs please reboot and re-run %s' % os.path.basename(sys.argv[0])
                     sys.exit(0)
 
@@ -661,8 +674,8 @@ Starts installation if node is not running a ProxMox kernel.
         else:
             stage2()
     except Exception as e:
-        with PrintEscControl(LIGHT_RED_COLOR, DEFAULT_COLOR):
-            with PrintEscControl(BOLD, RESET_BOLD):
+        with PrintEscControl(LIGHT_RED_COLOR):
+            with PrintEscControl(BOLD):
                 sys.stderr.write('\nFatal error occurred:\n')
             sys.stderr.write('%s\n' % e)
             if '--debug' in sys.argv:
