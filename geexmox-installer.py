@@ -54,7 +54,12 @@ class PrintEscControl:
         if end_seq is not None:
             self.end_seq = end_seq
         else:
-            self.end_seq = ''.join(RESET_TABLE[ch] for ch in reversed(begin_seq))
+            end_seq = []
+            for color in reversed(begin_seq.split('\x1b')):
+                if not color:
+                    continue
+                end_seq.append(RESET_TABLE['\x1b' + color])
+            self.end_seq = ''.join(end_seq)
 
     def __enter__(self, *a, **kw):
         self.__switch_color(self.begin_seq)
@@ -184,19 +189,22 @@ class QemuConfig:
     class QemuSubvalueWrapper:
         def __init__(self):
             self.__dict = {}
+            self.value = self
         def __setitem__(self, key, value):
             self.__dict[key] = value
         def __getitem__(self, key):
             return self.__dict[key].value
         def get(self, key, default=None):
             try:
-                result = self.__dict[name]
+                result = self.__dict[key]
             except KeyError:
                 return default
             return result.value
         def items(self):
             for key, value in self.__dict.items():
                 yield key, value.value
+        def __len__(self):
+            return len(self.__dict)
 
     QEMU_CONFIG_NAME_TO_VALUE = {
         'args': QemuConfigArgs,
@@ -684,18 +692,23 @@ def stage2():
             if dev.is_function:
                 continue
             print dev
-        print 'If this list is not what you want, hit Ctrl-C and run "%s --reconf"' % os.path.basename(sys.argv[0])
+        print
+        if not prompt_yesno('Is this list what you want'):
+            with PrintEscControl(BOLD):
+                print 'Run "%s --reconf" to reconfigure passthrough devices' % os.path.basename(sys.argv[0])
+                sys.exit(0)
+
         check_iommu_groups(passthru)
 
-    print 'Validating created VMs configurations...'
+    print '\nValidating created VMs configurations...'
     vms = VmNodeList.os_collect()
     for vm in vms:
         vm.parse_config()
         issues = vm.config.validate()
         if not issues:
             continue
-        with PrintEscControl(RED_COLOR):
-            print 'VM "%s" has configuration %s:' % (vm.name, 'issues' if len(issues) > 1 else 'issue')
+        with PrintEscControl(YELLOW_COLOR + BOLD):
+            print '\nVM "%s" has configuration %s:' % (vm.name, 'issues' if len(issues) > 1 else 'issue')
         for problem, solution in issues:
             print problem + ':'
             with PrintEscControl(BOLD):
