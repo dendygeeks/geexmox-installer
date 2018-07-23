@@ -11,6 +11,7 @@ import urllib
 import contextlib
 import traceback
 import glob
+import collections
 
 ROOT_EUID = 0
 
@@ -24,13 +25,15 @@ RESET_DIMMED = '\x1b[22m'
 # Console ESC colors
 RED_COLOR = '\x1b[31m'
 LIGHT_RED_COLOR = '\x1b[91m'
-YELLOW_COLOR = '\x1b[33m'
+YELLOW_COLOR = '\x1b[93m'
+GREEN_COLOR = '\x1b[92m'
 DEFAULT_COLOR = '\x1b[39m'
 
 RESET_TABLE = {
     RED_COLOR: DEFAULT_COLOR,
     LIGHT_RED_COLOR: DEFAULT_COLOR,
     YELLOW_COLOR: DEFAULT_COLOR,
+    GREEN_COLOR: DEFAULT_COLOR,
     BOLD: RESET_BOLD,
     DIMMED: RESET_DIMMED,
 }
@@ -65,6 +68,33 @@ class PrintEscControl:
         self.__switch_color(self.begin_seq)
     def __exit__(self, *a, **kw):
         self.__switch_color(self.end_seq)
+
+class CalledProcessError(subprocess.CalledProcessError):
+    def __init__(self, returncode, cmd, output=None, errout=None):
+        subprocess.CalledProcessError.__init__(self, returncode, cmd, output)
+        self.errout = errout
+
+    def __str__(self):
+        if self.returncode != 0:
+            return subprocess.CalledProcessError.__str__(self)
+        return 'Command "%s" reported error:\n%s' % (subprocess.list2cmdline(self.cmd), self.errout or 'unknown')
+    def __repr__(self):
+        if self.returncode != 0:
+            return subprocess.CalledProcessError.__repr__(self)
+        return 'Command "%s" reported error:\n%s' % (subprocess.list2cmdline(self.cmd), self.errout or 'unknown')
+
+def call_cmd(cmd, need_output=True, need_empty_stderr=True):
+    with PrintEscControl(DIMMED):
+        if not need_output:
+            print '$ %s' % subprocess.list2cmdline(cmd)
+        proc = subprocess.Popen(cmd,
+                stdout=subprocess.PIPE if need_output else None,
+                stderr=subprocess.PIPE if need_output else None)
+        proc.wait()
+        out, err = proc.communicate()
+        if proc.returncode != 0 or (need_output and need_empty_stderr and err.strip()):
+            raise CalledProcessError(proc.returncode, cmd, out, err)
+        return out
 
 class CpuVendor:
     INTEL = 'intel'
@@ -138,7 +168,7 @@ class PciDeviceList:
 
     @classmethod
     def _os_collect(cls):
-        pci = subprocess.check_output(['lspci', '-k', '-nn', '-vmm'])
+        pci = call_cmd(['lspci', '-k', '-nn', '-vmm'])
         item = {}
         for line in pci.splitlines():
             line = line.strip()
@@ -170,6 +200,8 @@ class PciDeviceList:
         return result
 
 class QemuConfig:
+    ValidateResult = collections.namedtuple('ValidateResult', 'problem solution have_to_stop')
+
     class QemuConfigEntry:
         def __init__(self, value):
             self.value = value.split(',')
@@ -245,20 +277,28 @@ class QemuConfig:
         issues = []
         if self['bios'][0] == 'ovmf':
             if not self.get('efidisk', {}).get('0', None):
-                issues.append(('Missing EFI disk with OVMF bios selected',
-                               'Please add EFI disk using ProxMox Hardware menu'))
+                issues.append(self.ValidateResult(
+                        problem='Missing EFI disk with OVMF bios selected',
+                        solution='Please add EFI disk using ProxMox Hardware menu',
+                        have_to_stop=True))
 
         # check that if we're passing something thru we use OVMF and don't use ballooning
         if self.get('hostpci'):
             if self['bios'][0] != 'ovmf':
-                issues.append(('Passing throught devices on non-OVMF bios is unsupported',
-                               'Switch BIOS to OVMF using ProxMox Options menu'))
+                issues.append(self.ValidateResult(
+                        problem='Passing throught devices on non-OVMF bios is unsupported',
+                        solution='Switch BIOS to OVMF using ProxMox Options menu',
+                        have_to_stop=True))
             if self.get('balloon') and self['balloon'][0] != '0':
-                issues.append(('Cannot enable memory ballooning when passing through PCI devices'
-                               'Disable memory ballooning using ProxMox Hardware menu'))
+                issues.append(self.ValidateResult(
+                        problem='Cannot enable memory ballooning when passing through PCI devices',
+                        solution='Disable memory ballooning using ProxMox Hardware menu',
+                        have_to_stop=True))
             if len(self['hostpci']) > 4:
-                issues.append(('Cannot have more than 4 PCI devices passed through',
-                               'Pass fewer PCI devices'))
+                issues.append(self.ValidateResult(
+                        problem='Cannot have more than 4 PCI devices passed through',
+                        solution='Pass fewer PCI devices',
+                        have_to_stop=False))
 
         # check that PCI passed through are driven by vfio
         for number, passthru_cfg in self.get('hostpci', {}).items():
@@ -267,22 +307,30 @@ class QemuConfig:
                     for dev in PciDeviceList.os_collect():
                         if dev.is_same_addr(item):
                             if not dev.can_passthru():
-                                issues.append(('Cannot pass through device at %s: not driven by a kernel module' % item,
-                                               'Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1])))
+                                issues.append(self.ValidateResult(
+                                        problem='Cannot pass through device at %s: not driven by a kernel module' % item,
+                                        solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
+                                        have_to_stop=True))
                             if not dev.is_driven_by_vfio():
-                                issues.append(('Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER),
-                                               'Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1])))
+                                issues.append(self.ValidateResult(
+                                        problem='Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER),
+                                        solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
+                                        have_to_stop=True))
 
         # check that if '-cpu' is present in 'args' it matches global 'cpu'
-        if self.get('args'):
+        if self.get('args') and self.get('cpu'):
             cpu_index = self['args'].index('-cpu')
-            if cpu_index > 0:
+            if cpu_index > 0 and self.get('cpu'):
                 if cpu_index + 1 >= len(self['args']):
-                    issues.append(('No cpu value present for -cpu argument: %s' % self['args'],
-                                   'Please fix qemu config for %s vmid' % self.vmid))
-                if self['cpu'][0] not in self['args'][cpu_index + 1]:
-                    issues.append(('CPU type in args differs from global CPU type',
-                                  'Please select matching CPU type or fix -cpu argument'))
+                    issues.append(self.ValidateResult(
+                            problem='No cpu value present for -cpu argument: %s' % self['args'],
+                            solution='Please fix qemu config for %s vmid' % self.vmid,
+                            have_to_stop=True))
+                if self['args'][cpu_index + 1].split(',')[0] != self['cpu'][0]:
+                    issues.append(self.ValidateResult(
+                            problem='CPU type in args differs from global CPU type',
+                            solution='Please select matching CPU type or fix -cpu argument',
+                            have_to_stop=True))
 
         return issues
 
@@ -304,7 +352,8 @@ class VmNode:
         return '%(vmid)s %(name)s %(status)s %(mem)s %(bootdisk)s %(pid)s' % subst
 
     def parse_config(self):
-        lines = subprocess.check_output(['qm', 'config', self.vmid]).splitlines()
+        print 'Getting config for "%s"...' % self.name
+        lines = call_cmd(['qm', 'config', str(self.vmid)]).splitlines()
         for line in lines:
             self.config.parse_line(line)
 
@@ -315,7 +364,8 @@ class VmNodeList:
     
     @classmethod
     def os_collect(cls):
-        qm = subprocess.check_output(['qm', 'list'])
+        print 'Getting list of VMs...'
+        qm = call_cmd(['qm', 'list'])
         buf = StringIO.StringIO(qm)
         
         csv.register_dialect('qm', cls.QmDialect)
@@ -390,6 +440,7 @@ def get_module_depends(modname):
     except subprocess.CalledProcessError as err:
         if ('%s not found' % modname) in err.output:
             return []
+        sys.stderr.write(err.output)
         raise
 
     for line in modinfo.splitlines():
@@ -474,21 +525,17 @@ def install_proxmox():
         disable_pve_enterprise()
 
     print '\nUpdating apt db...'
-    with PrintEscControl(DIMMED):
-        subprocess.check_call(['apt-get', 'update'])
+    call_cmd(['apt-get', 'update'], need_output=False)
     print
     if prompt_yesno('ProxMox recommends dist-upgrade, perform now'):
         print 'Upgrading distribution...'
-        with PrintEscControl(DIMMED):
-            subprocess.check_call(['apt-get', 'dist-upgrade', '-y', '--allow-unauthenticated', '--allow-downgrades'])
+        call_cmd(['apt-get', 'dist-upgrade', '-y', '--allow-unauthenticated', '--allow-downgrades'], need_output=False)
 
     print '\nInstalling ProxMox...'
-    with PrintEscControl(DIMMED):
-        subprocess.check_call(['apt-get', 'install', '-y', '--allow-unauthenticated', '--allow-downgrades', 'proxmox-ve', 'open-iscsi'])
+    call_cmd(['apt-get', 'install', '-y', '--allow-unauthenticated', '--allow-downgrades', 'proxmox-ve', 'open-iscsi'], need_output=False)
     print
     if prompt_yesno('ProxMox recommends installing postfix, install', default_answer=False):
-        with PrintEscControl(DIMMED):
-            subprocess.check_call(['apt-get', 'install', '-y', 'postfix'])
+        call_cmd(['apt-get', 'install', '-y', 'postfix'], need_output=False)
     print
     if no_enterprise:
         disable_pve_enterprise(verbose=False)
@@ -575,8 +622,7 @@ def ensure_vfio(devices):
 
     if need_update_initramfs:
         print '\nUpdating initramfs to apply vfio configuration...'
-        with PrintEscControl(DIMMED):
-            subprocess.check_call(['update-initramfs', '-u', '-k', 'all'])
+        call_cmd(['update-initramfs', '-u', '-k', 'all'], need_output=False)
 
 IOMMU_ENABLING = {
     CpuVendor.INTEL: ['intel_iommu=on', 'video=efifb:off'],
@@ -603,8 +649,7 @@ def ensure_kernel_params_no_reboot(kernel_params):
         print 'Updating grub config...'
         with open('/etc/default/grub', 'w') as grub_conf:
             grub_conf.write(''.join(grub_text))
-        with PrintEscControl(DIMMED):
-            subprocess.check_call(['update-grub'])
+        call_cmd(['update-grub'], need_output=False)
     return not update_grub_config
 
 def enable_iommu(devices):
@@ -701,18 +746,29 @@ def stage2():
         check_iommu_groups(passthru)
 
     print '\nValidating created VMs configurations...'
-    vms = VmNodeList.os_collect()
+    vms = list(VmNodeList.os_collect())
     for vm in vms:
         vm.parse_config()
+
+    have_to_stop = False
+    for vm in vms:
         issues = vm.config.validate()
         if not issues:
             continue
         with PrintEscControl(YELLOW_COLOR + BOLD):
-            print '\nVM "%s" has configuration %s:' % (vm.name, 'issues' if len(issues) > 1 else 'issue')
-        for problem, solution in issues:
-            print problem + ':'
-            with PrintEscControl(BOLD):
-                print '\t%s.' % solution
+            print '\nWARNING: VM "%s" has configuration %s:' % (vm.name, 'issues' if len(issues) > 1 else 'issue')
+        for issue in issues:
+            with PrintEscControl(YELLOW_COLOR):
+                print issue.problem + '.'
+            with PrintEscControl(GREEN_COLOR):
+                with PrintEscControl(BOLD):
+                    print 'SOLUTION: ',
+                print '%s.' % issue.solution
+            have_to_stop = have_to_stop or issue.have_to_stop
+
+    if have_to_stop:
+        with PrintEscControl(BOLD):
+            print '\nPlease fix issues above and re-run %s to continue configuring' % os.path.basename(sys.argv[0])
 
 
 if __name__ == '__main__':
