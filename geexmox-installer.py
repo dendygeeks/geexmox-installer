@@ -12,6 +12,7 @@ import contextlib
 import traceback
 import glob
 import collections
+import copy
 
 ROOT_EUID = 0
 
@@ -44,6 +45,8 @@ APT_CONFIGS = [
     ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/sources.list.d/geexmox.list',
      '/etc/apt/sources.list.d/geexmox.list')
 ]
+
+MAX_PASSTHROUGH = 4
 
 class PrintEscControl:
     @staticmethod
@@ -226,6 +229,8 @@ class QemuConfig:
             self.__dict[key] = value
         def __getitem__(self, key):
             return self.__dict[key].value
+        def __delitem__(self, key):
+            del self.__dict[key]
         def get(self, key, default=None):
             try:
                 result = self.__dict[key]
@@ -264,6 +269,8 @@ class QemuConfig:
     
     def __getitem__(self, name):
         return self.__config[name].value
+    def __setitem__(self, name, value):
+        self.__config[name] = value
 
     def get(self, name, default=None):
         try:
@@ -271,6 +278,19 @@ class QemuConfig:
         except KeyError:
             return default
         return result.value
+
+    @classmethod
+    def translate_hostpci_to_devices(cls, hostpci_entry):
+        for item in hostpci_entry:
+            if cls.PCI_SLOT_ADDR.match(item):
+                for dev in PciDeviceList.os_collect():
+                    if dev.is_same_addr(item):
+                        yield dev
+
+    def get_hostpci_devices(self):
+        for _, passthru_cfg in self.get('hostpci', {}).items():
+            for dev in self.translate_hostpci_to_devices(passthru_cfg):
+                yield dev
 
     def validate(self):
         # check that OVMF bios has EFI disk
@@ -294,28 +314,30 @@ class QemuConfig:
                         problem='Cannot enable memory ballooning when passing through PCI devices',
                         solution='Disable memory ballooning using ProxMox Hardware menu',
                         have_to_stop=True))
-            if len(self['hostpci']) > 4:
+            if len(self['hostpci']) > MAX_PASSTHROUGH:
                 issues.append(self.ValidateResult(
-                        problem='Cannot have more than 4 PCI devices passed through',
+                        problem='Cannot have more than %d PCI devices passed through' % MAX_PASSTHROUGH,
                         solution='Pass fewer PCI devices',
                         have_to_stop=False))
+            nums = [int(number) for number, _ in self['hostpci'].items()]
+            if min(nums) < 0 or max(nums) >= MAX_PASSTHROUGH:
+                issues.append(self.ValidateResult(
+                        problem='Cannot have hostpci number < 0 or >= %d' % MAX_PASSTHROUGH,
+                        solution='Please fix qemu config for %s vmid' % self.vmid,
+                        have_to_stop=True))
 
         # check that PCI passed through are driven by vfio
-        for number, passthru_cfg in self.get('hostpci', {}).items():
-            for item in passthru_cfg:
-                if self.PCI_SLOT_ADDR.match(item):
-                    for dev in PciDeviceList.os_collect():
-                        if dev.is_same_addr(item):
-                            if not dev.can_passthru():
-                                issues.append(self.ValidateResult(
-                                        problem='Cannot pass through device at %s: not driven by a kernel module' % item,
-                                        solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
-                                        have_to_stop=True))
-                            if not dev.is_driven_by_vfio():
-                                issues.append(self.ValidateResult(
-                                        problem='Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER),
-                                        solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
-                                        have_to_stop=True))
+        for dev in self.get_hostpci_devices():
+            if not dev.can_passthru():
+                issues.append(self.ValidateResult(
+                        problem='Cannot pass through device at %s: not driven by a kernel module' % item,
+                        solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
+                        have_to_stop=True))
+            if not dev.is_driven_by_vfio():
+                issues.append(self.ValidateResult(
+                        problem='Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER),
+                        solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
+                        have_to_stop=True))
 
         # check that if '-cpu' is present in 'args' it matches global 'cpu'
         if self.get('args') and self.get('cpu'):
@@ -375,19 +397,28 @@ class VmNodeList:
         for item in reader:
             yield VmNode.parse_qmlist_dict(item)
 
-def print_devices():
+def print_devices(enabler, show_disabled=True):
     printed_devs = []
     def perform_grouping(label, predicate):
-        print BOLD + label + RESET_BOLD
+        title_shown = False
+        
         for dev in PciDeviceList.os_collect():
             if dev.is_function or not predicate(dev):
                 continue
-            if dev.can_passthru():
+            if enabler(dev):
                 printed_devs.append(dev)
+                if not title_shown:
+                    print BOLD + label + RESET_BOLD
+                    title_shown = True
                 print "%2d. %s" % (len(printed_devs), dev)
-            else:
+            elif show_disabled:
+                if not title_shown:
+                    print BOLD + label + RESET_BOLD
+                    title_shown = True
                 print '%s    %s%s' % (RED_COLOR, dev, DEFAULT_COLOR)
-        print
+    
+        if title_shown:
+            print
 
     perform_grouping("VGA CONTROLLERS (videocards)",
             lambda dev: dev.class_id == PciDevice.VGA_CONTROLLER)
@@ -406,6 +437,11 @@ def download(url, target):
                 f.write(page.read())
     except IOError:
         raise IOError("Can't download the file %s as %s" % (url, target))
+
+def print_title(msg):
+    with PrintEscControl(BOLD):
+        print '%s\n%s\n' % (msg, '=' * len(msg.strip()))
+
 
 def prompt_yesno(msg, default_answer=True):
     prompt = '%s? [%s] ' % (msg, 'Y/n' if default_answer else 'y/N')
@@ -695,11 +731,9 @@ def stage1():
     inject_geexmox_overrides() 
     install_proxmox()
 
-    with PrintEscControl(BOLD):
-        msg = 'PCI devices present:'
-        print '%s\n%s\n' % (msg, '=' * len(msg))
+    print_title('PCI devices present:')
 
-    devices = print_devices()
+    devices = print_devices(lambda dev: dev.can_passthru())
 
     while True:
         passthru = prompt_comma_list('Input comma-separated list of devices to enable passthrough for: ', 1, len(devices))
@@ -722,8 +756,8 @@ def stage1():
         ensure_vfio(pass_devices)
         enable_iommu(pass_devices)
 
-    with PrintEscControl(BOLD + YELLOW_COLOR):
-        print 'To continue with configuring VMs please reboot and re-run %s' % os.path.basename(sys.argv[0])
+    with PrintEscControl(BOLD):
+        print '\nTo continue with configuring VMs please reboot and re-run %s' % os.path.basename(sys.argv[0])
 
 def check_iommu_groups(devices):
     iommu = {}
@@ -755,28 +789,7 @@ def check_iommu_groups(devices):
                     print 'To continue with configuring VMs please reboot and re-run %s' % os.path.basename(sys.argv[0])
                     sys.exit(0)
 
-def select_devs_for_passthrough(vm):
-    print "Select devs"
-def enable_macos_support(vm):
-    print "Enable macos"
-
-def stage2():
-    passthru = [dev for dev in PciDeviceList.os_collect() if dev.is_driven_by_vfio()]
-    if passthru:
-        print 'Devices selected for passing through:'
-        for dev in passthru:
-            if dev.is_function:
-                continue
-            print dev
-        print
-        if not prompt_yesno('Is this list what you want'):
-            with PrintEscControl(BOLD):
-                print 'Run "%s --reconf" to reconfigure passthrough devices' % os.path.basename(sys.argv[0])
-                sys.exit(0)
-
-        check_iommu_groups(passthru)
-
-    print
+def list_and_validate_vms():
     vms = list(VmNodeList.os_collect())
     print '\nValidating created VMs configurations...'
     for vm in vms:
@@ -801,29 +814,140 @@ def stage2():
     if have_to_stop:
         with PrintEscControl(BOLD):
             print '\nPlease fix issues above and re-run %s to continue configuring' % os.path.basename(sys.argv[0])
-            sys.exit(1)
+            #XXX sys.exit(1)
+
+    return vms
+
+def choose_devs_for_passthrough(vm):
+    if vm.config.get('hostpci'):
+        print_title('\nPCI devices already passed through:')
+        for dev in vm.config.get_hostpci_devices():
+            if dev.is_function:
+                continue
+            print dev
+    print_title('\nPCI devices available for passthrough:')
+
+    devices = print_devices(lambda dev: dev.is_driven_by_vfio(), False)
+    passthru = prompt_comma_list('Input comma-separated list of devices to passthrough in "%s" (0 - go back): ' % vm.name, 0, len(devices))
+    if 0 in passthru:
+        return [], vm.config
+
+    passthru = [devices[idx - 1] for idx in passthru]
+
+    removed = {}
+    number_keep, added = set(), list(passthru)
+
+    for number, passthru_cfg in vm.config.get('hostpci', {}).items():
+        for old_dev in vm.config.translate_hostpci_to_devices(passthru_cfg):
+            for dev in passthru:
+                if dev.is_same_addr(old_dev.slot):
+                    added.remove(dev)
+                    number_keep.add(number)
+                    break
+            else:
+                removed[number] = old_dev
+
+    if not removed and not added:
+        print 'No chages to PCI passthrough'
+        return [], vm.config
+
+    new_config = copy.deepcopy(vm.config)
+    to_delete = set()
+    to_set = []
+
+    if removed:
+        with PrintEscControl(BOLD):
+            print '\nThese devices are going to be no longer passed through:'
+        for number, dev in removed.items():
+            del new_config['hostpci'][number]
+            to_delete.add(number)
+            print dev
+
+    free_nums = sorted(set(range(MAX_PASSTHROUGH)) - number_keep)
+
+    if added:
+        if not new_config.get('hostpci'):
+            new_config['hostpci'] = QemuConfig.QemuSubvalueWrapper()
+        with PrintEscControl(BOLD):
+            print '\nThese devices are going to be added for passing through:'
+        for number, dev in zip(free_nums, added):
+            if number in to_delete:
+                to_delete.remove(number)
+            xvga = ',x-vga=on' if dev.class_id == PciDevice.VGA_CONTROLLER else ''
+            to_set.extend(['-hostpci%s' % number, '%s,pcie=1%s' % (dev.slot, xvga)])
+            new_config['hostpci'][number] = QemuConfig.QemuConfigEntry(to_set[-1]) 
+            print dev
+
+    if to_delete:
+        to_set.extend(['-delete', ','.join('hostpci%s' % num for num in to_delete)])
+
+    return to_set, new_config
+
+def edit_vm_config(vm, edit_callback, apply_callback):
+    while True:
+        how_to, new_config = edit_callback(vm)
+        if not how_to:
+            return
+        if not prompt_yesno('Is this what you wanted'):
+            continue
+
+        issues = new_config.validate()
+        if not issues:
+            break
+        with PrintEscControl(YELLOW_COLOR):
+            print 'Cannot apply configuration changes, issues detected'
+        for issue in issues:
+            print issue.problem
+
+    if how_to:
+        return apply_callback(vm, how_to)
+
+def apply_qm_options(vm, options):
+    call_cmd(['qm', 'set', str(vm.vmid)] + list(options))
+    vm.parse_config()
+
+def select_devs_for_passthrough(vm):
+    return edit_vm_config(vm, choose_devs_for_passthrough, apply_qm_options)
+
+def enable_macos_support(vm):
+    print "Enable macos"
+
+def stage2():
+    print_title('\nDevices available for passing through:')
+    passthru = print_devices(lambda dev: dev.is_driven_by_vfio())
+    if passthru:
+        check_iommu_groups(passthru)
+    else:
+        with PrintEscControl(BOLD):
+            print 'No devices selected'
+
+    if not prompt_yesno('Is this list what you want'):
+        with PrintEscControl(BOLD):
+            print 'Run "%s --reconf" to reconfigure passthrough devices' % os.path.basename(sys.argv[0])
+            sys.exit(0)
+    
+    print
+    vms = list_and_validate_vms()
 
     while True:
         print
 
-        with PrintEscControl(BOLD):
-            msg = 'Virtual Machines present:'
-            print '%s\n%s\n' % (msg, '=' * len(msg))
+        print_title('Virtual Machines present:')
 
         for index, vm in enumerate(vms):
             print '%2d. %s' % (index+1, vm.name)
 
         print
 
-
         val = prompt_int('Enter the VM index to edit (0 - exit): ', 0, len(vms))
         if val == 0:
             break
 
         vm = vms[val - 1]
+
         while True:
             with PrintEscControl(BOLD):
-                print "\nSelect an operation:"
+                print '\nEditing "%s" machine.\nSelect an operation to perform:' % vm.name
             print
             ops = [
                 ("Select PCI devices for passing through", select_devs_for_passthrough),
