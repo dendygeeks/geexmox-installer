@@ -130,7 +130,7 @@ class PciDevice:
 
         if slot.endswith('.0'):
             self.is_function = False
-            self.slot = slot[:-2]
+            #self.slot = slot[:-2]
         else:
             self.is_function = True
 
@@ -375,6 +375,7 @@ class VmNode:
 
     def parse_config(self):
         print 'Getting config for "%s"...' % self.name
+        self.config = QemuConfig(self.vmid)
         lines = call_cmd(['qm', 'config', str(self.vmid)]).splitlines()
         for line in lines:
             self.config.parse_line(line)
@@ -403,7 +404,7 @@ def print_devices(enabler, show_disabled=True):
         title_shown = False
         
         for dev in PciDeviceList.os_collect():
-            if dev.is_function or not predicate(dev):
+            if not predicate(dev):
                 continue
             if enabler(dev):
                 printed_devs.append(dev)
@@ -647,7 +648,7 @@ def ensure_vfio(devices):
     modprobe_cfg.append(('softdep vfio-pci', ' '.join(['post:'] + device_modules)))
     for module in device_modules:
         modprobe_cfg.append(('softdep %s' % module, 'pre: vfio-pci'))
-    modprobe_cfg.append(('options vfio-pci', 'ids=%s' % ','.join(sorted(device_ids))))
+    modprobe_cfg.append(('options vfio-pci', 'ids=%s' % ','.join(sorted(set(device_ids)))))
 
     not_found = []
     for starter, value in modprobe_cfg:
@@ -659,7 +660,6 @@ def ensure_vfio(devices):
                     no_comment = line.split('#')[0].strip()
                     if no_comment.startswith(starter + ' '):
                         if no_comment[len(starter):].strip() != value:
-                            import pdb;pdb.set_trace()
                             with PrintEscControl(YELLOW_COLOR):
                                 print 'Commenting out "%s" in %s' % (line.strip(), fname)
                             do_patch = True
@@ -771,8 +771,6 @@ def check_iommu_groups(devices):
 
     group_devs = {}
     for dev in devices:
-        if dev.is_function:
-            continue
         group = iommu[dev.full_slot]
         group_devs.setdefault(group, []).append(dev)
     group_devs = {key: val for (key, val) in group_devs.items() if len(val) > 1}
@@ -822,8 +820,6 @@ def choose_devs_for_passthrough(vm):
     if vm.config.get('hostpci'):
         print_title('\nPCI devices already passed through:')
         for dev in vm.config.get_hostpci_devices():
-            if dev.is_function:
-                continue
             print dev
     print_title('\nPCI devices available for passthrough:')
 
@@ -855,28 +851,35 @@ def choose_devs_for_passthrough(vm):
     to_delete = set()
     to_set = []
 
+    if removed or added:
+        print_title('\nPassthrough devices changes:')
+
     if removed:
         with PrintEscControl(BOLD):
-            print '\nThese devices are going to be no longer passed through:'
+            print 'These devices are going to be no longer passed through:'
         for number, dev in removed.items():
             del new_config['hostpci'][number]
             to_delete.add(number)
-            print dev
+            with PrintEscControl(YELLOW_COLOR):
+                print dev
+        print
 
-    free_nums = sorted(set(range(MAX_PASSTHROUGH)) - number_keep)
+    free_nums = sorted(set([str(x) for x in range(MAX_PASSTHROUGH)]) - number_keep)
 
     if added:
         if not new_config.get('hostpci'):
             new_config['hostpci'] = QemuConfig.QemuSubvalueWrapper()
         with PrintEscControl(BOLD):
-            print '\nThese devices are going to be added for passing through:'
+            print 'These devices are going to be added for passing through:'
         for number, dev in zip(free_nums, added):
             if number in to_delete:
                 to_delete.remove(number)
             xvga = ',x-vga=on' if dev.class_id == PciDevice.VGA_CONTROLLER else ''
             to_set.extend(['-hostpci%s' % number, '%s,pcie=1%s' % (dev.slot, xvga)])
             new_config['hostpci'][number] = QemuConfig.QemuConfigEntry(to_set[-1]) 
-            print dev
+            with PrintEscControl(GREEN_COLOR):
+                print dev
+        print
 
     if to_delete:
         to_set.extend(['-delete', ','.join('hostpci%s' % num for num in to_delete)])
@@ -903,6 +906,7 @@ def edit_vm_config(vm, edit_callback, apply_callback):
         return apply_callback(vm, how_to)
 
 def apply_qm_options(vm, options):
+    print 'Applying changes to "%s" machine configuration...' % vm.name
     call_cmd(['qm', 'set', str(vm.vmid)] + list(options))
     vm.parse_config()
 
