@@ -914,7 +914,83 @@ def select_devs_for_passthrough(vm):
     return edit_vm_config(vm, choose_devs_for_passthrough, apply_qm_options)
 
 def enable_macos_support(vm):
-    print "Enable macos"
+    ensure_values = [
+        ('bios', 'ovmf', 'MacOS should run using OVMF BIOS, please change the settings using Proxmox Options tab'),
+        ('vga', 'std', 'MacOS should run using Standard VGA display, please change the settings using Proxmox Hardware tab'),
+    ]
+    machine_target = 'pc-q35-2.11'
+    cpu_target = 'Penryn'
+    net_target = 'e1000-82545em'
+
+    found_problems = 0
+    for name, value, message in ensure_values:
+        if vm.config[name][0] != value:
+            with PrintEscControl(YELLOW_COLOR):
+                print message
+            found_problems += 1
+    if found_problems > 0:
+        with PrintEscControl(YELLOW_COLOR):
+            print 'After fixing the %s please re-run %s' % ('issues' if found_problems > 1 else 'issue', os.path.basename(sys.argv[0]))
+        return
+
+    options = []
+    if vm.config['machine'][0] != machine_target:
+        options.append(('Changing machine to "%s"' % machine_target, ['-machine', machine_target]))
+    else:
+        print 'Correct machine type already specified'
+
+    if vm.config['cpu'][0] != cpu_target:
+        options.append(('Changing CPU to "%s"' % cpu_target, ['-cpu', cpu_target]))
+    else:
+        print 'Correct CPU already specified'
+
+    if vm.config.get('net'):
+        for number, value in vm.config['net'].items():
+            if value[0].split('=', 1)[0] == net_target:
+                print 'Correct network adapter already specified'
+                break
+            if value[0].split('=', 1)[0] == 'e1000':
+                pieces = value[0].split('=', 1)
+                if len(pieces) == 2:
+                    new_value = ['%s=%s' % (net_target, pieces[1])]
+                else:
+                    new_value = [net_target]
+                new_value += value[1:]
+                options.append(('Changing network adapter to "%s"' % net_target,
+                                ['-net%s' % number, ','.join(new_value)]))
+                break
+        else:
+            with PrintEscControl(YELLOW_COLOR):
+                print 'Either drop network connectivity or add a E1000 network adapter and re-run %s' % os.path.basename(sys.argv[0])
+                return
+
+    oskey, apple_smc_index = None, -1
+    for idx, arg in enumerate(vm.config.get('args', [])):
+        subargs = arg.split(',')
+        if subargs[0] != 'isa-applesmc':
+            continue
+        apple_smc_index = idx
+        params = {}
+        for subarg in subargs[1:]:
+            if '=' in subarg:
+                key, value = subarg.split('=', 1)
+                params[key] = value
+        oskey = params.get('osk')
+        break
+
+    print
+    print_title('Manage MacOS OSK')
+    if oskey:
+        print 'Current OS key: "%s"' % oskey
+        if not prompt_yesno('Is current OS key correct'):
+            oskey = None
+    if not oskey:
+        print 'For getting MacOS OSK refer to this guide, section "Fetch the OSK authentication key":'
+        print 'https://www.nicksherlock.com/2017/10/installing-macos-high-sierra-on-proxmox-5/'
+        oskey = raw_input('\nMacOS OSK: ')
+
+    # TODO: implement -args adding to "options"
+    # TODO: implement "options" application
 
 def stage2():
     print_title('\nDevices available for passing through:')
