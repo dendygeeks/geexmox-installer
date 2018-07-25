@@ -886,11 +886,16 @@ def list_and_validate_vms():
 
     return vms
 
-def choose_devs_for_passthrough(vm):
+def show_passthrough_devs(vm):
     if vm.config.get('hostpci'):
         print_title('\nPCI devices already passed through:')
         for dev in vm.config.get_hostpci_devices():
             print dev
+    else:
+        print 'Currently no PCI devices are passed through'
+
+def choose_devs_for_passthrough(vm):
+    show_passthrough_devs(vm)
     print_title('\nPCI devices available for passthrough:')
 
     devices = print_devices(lambda dev: dev.is_driven_by_vfio(), False)
@@ -1233,6 +1238,7 @@ def stage2():
                 print '\nEditing "%s" machine.\nSelect an operation to perform:' % vm.name
             print
             ops = [
+                ('Show passed through PCI devices', show_passthrough_devs),
                 ("Select PCI devices for passing through", select_devs_for_passthrough),
                 ("Enable macOS support for the VM", enable_macos_support)
             ]
