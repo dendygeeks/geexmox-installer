@@ -93,7 +93,7 @@ def encode(data, fname, use_zip=True):
 
     encoded = base64.b64encode(buf.getvalue())
     with open(fname, 'wb') as out:
-        out.write('zip\n' if use_zip else 'bz2\n')
+        out.write('zip\n' if use_zip else 'tar\n')
         for group in itertools.izip_longest(*[iter(encoded)] * 120, fillvalue=''):
             out.write(''.join(group) + '\n')
 

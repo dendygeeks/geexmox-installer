@@ -48,6 +48,72 @@ APT_CONFIGS = [
 
 MAX_PASSTHROUGH = 4
 
+class ElephantArt:
+    # unpacks mascot ASCII art from embedded text;
+    # for more see decoration/html2ascii.py
+    DATA = '''
+    tar
+    QlpoOTFBWSZTWcxvvLEAA13//9+5+OTLV/eeXBgQQf+hHgQIcXAABAASTABAAASH////0AYesx4qRc6OtQ4DdnQGmiENAU2qej1IxAabUxAADEAAA9QAD1MT
+    Jk9EDU8mkTUoNHpAHqaaADIAANAAAAAAAANDjQ0aNBo0DQAAAAAMgAAADQGQAGDT0iSmFPRHqGgbUAPUGgAAAAAAAAAAASEiCCaoeTU9QzKaemoaAAAPUAAG
+    QAAAB6ntKc2/y9XCyBeFgJJcT63HhyMrZngJK50g9/xj3uU8Tp+ZBShw1dLBSBR64R8U8ZCKoUQtkgH1GaEDExkYwc8XwiAJAnVghDKbGdCiVGXDDzkM+EMv
+    CIGBSmzbNSoVJoKI3rJgSLRnhgxiaydPY3zDs8hqwzS+jokHZRI2468U7JW6JzvmZmFpBg2A22gG443eJKPpa4RiKGZVCmCI5N9rY++q11kyNMccGZscVUSo
+    nURBra6GWY2kCANuJJ4ndTiwgX9JuVWq4dOzsKQBNppU6lVLQJU7ph00U5ASAECBJis5myGQCA0mes/HnNLHGZDLEK4vivAKCmpZw0uMQ2h2iBatV5Q2Nhdr
+    T4Ok4NfgUh4Zx6O9v4M0zNO1mn+AVCBZwEBBbS3nVCvY7pWRtqPtdm5p7rxZhmwNLBvQxRgpG4KmsyobpV23u7LlNDa14xDaVDE2RobQ2dPqQI7c4ZdFoIWF
+    GEwZLp0g6LEq9fvibQIQxoGpdEKgFCBJYBQwJpyJSQhAKAxRBEiAHews0zYsREYiGRFmG/NEOC8iuwZ7daoU0E7dwK3iF2kmwTtFs79CPZ4PVaK9HlNLKnKC
+    ZDrELycxhaQufoWs+RRAMXlihLFmCtw66mRMzSkps1oRIshXW56lJhWZGUVkMxUyrK5ZHCwF93EqpCAwmMIdJeAJkO2Cbg5V64ErFCBO9/X32t3RUbOym7t/
+    wTRXcef7096qG9LjiFZUp3tDHa2jesXT39PHHf/1tkJudIz7rnOmy4cKnLknVuzC5Y3Pjl2T0WKOvRwKK7z3GpRbcXWXTy5D65nrGuq+HhAmcORg4+eMDKHk
+    PRSpcCSGDciyiYimxFNBGWrTlvQqThwgyy7PMAR0FSAg6VUcFmSGCOHXwza9MUnNVKuagU1VStF6EOMpfBiRFScRgXdMV1UiSFiNTayrabMwaJBEuLpCWhIr
+    9WjFibEmHYh+qPGaCSk6qbKxkEM95DKgJSRxvUWq8Yasm3aUTMMDGzIwhki8TE4XcOTSDSLEXlitVVI1gBm01dRBlK1lEhm6sdbghBIdYIpBDBwUXmCCVN2F
+    MoCpZDNFVSGk5iszESEwVDgWNGWaURoiKIkEOIGLxxitjJeS8xYNjhMKd2ViNGAxFMLOzCzwqZ5QpqzSWTpqDC1Va6GwDJgderl6SP91rHIk05VTLWbHocrX
+    pgsGWvFoZcxsFGTVpAs0qMahV4LB4lSXoxtYxjGqdU4WZoSEvzYG3sKVR6yKCfyuxRYa3RCujG2B2cBZfr0ZZNA1z55r59RoRoM8hZgw+3Iy936hZo+I0I3D
+    7Do59yUbTc2NA2xJoWwPu5t42v9uyG+MWIZROSV2muGUoAXYJUbg287NvDNySgigiASUv6Gs0BIeQEJUSlQJCI0GgThvIKJIIJh0NMbXDDhqhxgUDUWt2ajB
+    Ngm02mJJgAw7TQ9j6jj4XZbzbJfhc1unWqGLDCsmroiQQIICSMVjXjM8+agIzfwVkn8nNtP8CmmNsnOOcT0YQLIp5cfPL54lKi0jZdo7thzaypWgccLTXLOh
+    3j5ItzkyL2IHPEQpwWFOXsPrQLkTdNxCgWcC8SzqIuPX3u2G3i4KYyqKcLOVv3IjowIBTbEdXrsGDEL/xdyRThQkMxvvLEA=
+    '''
+
+    ANSI_ESC_COLOR = '\x1b[40;1;38;5;%dm%s'
+    ANSI_RESET_COLOR = '\x1b[0m'
+
+    @classmethod
+    def get_mascot(cls):
+        import base64
+        import zipfile
+        import tarfile
+        import struct
+        import StringIO
+
+        lines = [line.strip() for line in cls.DATA.splitlines() if line.strip()]
+        if lines[0].lower() not in ('zip', 'tar'):
+            raise ValueError('Unsupported format')
+        use_zip = lines[0].lower() == 'zip'
+        buf = StringIO.StringIO(base64.b64decode(''.join(lines[1:])))
+        
+        if use_zip:
+            with zipfile.ZipFile(buf, 'r') as zf:
+                data = zf.open('ascii-ansi.bin').read()
+        else:
+            with tarfile.open(fileobj=buf) as tf:
+                data = tf.extractfile('ascii-ansi.bin').read()
+
+        result = []
+        for line in data.splitlines():
+            row, offset = [], 0
+            line = line.strip()
+            while offset < len(line):
+                fmt = '<Bb'
+                color, size = struct.unpack_from(fmt, line, offset)
+                offset += struct.calcsize(fmt)
+                fmt = '<%ds' % (1 if size < 0 else size)
+                text, = struct.unpack_from(fmt, line, offset)
+                offset += struct.calcsize(fmt)
+                if size < 0:
+                    text = text[0] * (-size)
+                row.append(cls.ANSI_ESC_COLOR % (color, text))
+            result.append(''.join(row))
+        result.append(cls.ANSI_RESET_COLOR)
+
+        return '\n'.join(result)
+
 class PrintEscControl:
     @staticmethod
     def __switch_color(color):
@@ -1058,6 +1124,8 @@ Starts installation if node is not running a ProxMox kernel.
             sys.exit('%s must be run as root' % sys.argv[0])
         if subprocess.check_output(['arch']).strip() != 'x86_64':
             sys.exit('%s can only work on x86_64 OS' % sys.argv[0])
+
+        print ElephantArt.get_mascot()
 
         is_proxmox_kernel = subprocess.check_output(['uname', '-r']).strip().endswith('-pve')
         if not is_proxmox_kernel or '--reconf' in sys.argv:
