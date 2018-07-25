@@ -979,10 +979,108 @@ def apply_qm_options(vm, options):
 def select_devs_for_passthrough(vm):
     return edit_vm_config(vm, choose_devs_for_passthrough, apply_qm_options)
 
+class QemuArgsManager:
+    QemuArgument = collections.namedtuple('QemuArgument', 'type params')
+    QemuArgumentParam = collections.namedtuple('QemuArgumentParam', 'name prefix value')
+    QEMU_PARAM_RE = re.compile(r'([^a-zA-Z]*)([^=]+)(=(.*))?')
+
+    def __init__(self, parsed):
+        self.qargs = parsed
+        self.dirty = False
+
+    @classmethod
+    def parse_param_str(cls, param_str):
+        if not param_str:
+            return []
+
+        params = []
+        for param in param_str.split(','):
+            try:
+                match = cls.QEMU_PARAM_RE.match(param).groups()
+            except AttributeError:
+                raise ValueError('Malformed qemu argument parameter: %s' % param_str)
+            params.append(cls.QemuArgumentParam(name=match[1], prefix=match[0], value=match[3]))
+        return params
+
+    @classmethod
+    def parse_args(cls, vm):
+        result, current_type = [], None
+        for arg in vm.config.get('args', []):
+            if arg.startswith('-'):
+                # new argument type detected
+                if current_type is not None:
+                    result.append(cls.QemuArgument(type=current_type, params=[]))
+                current_type = arg[1:]
+            else:
+                result.append(cls.QemuArgument(type=current_type, params=cls.parse_param_str(arg)))
+                current_type = None
+        if current_type is not None:
+            result.append(cls.QemuArgument(type=current_type, params=[]))
+        return cls(result)
+
+    def ensure_arg(self, type, start_params, needed_params):
+        if isinstance(start_params, str):
+            start_params = self.parse_param_str(start_params)
+        if isinstance(needed_params, str):
+            needed_params = self.parse_param_str(needed_params)
+
+        for qarg in self.qargs:
+            if qarg.type == type:
+                arg_found = False
+                for qparam, sparam in zip(qarg.params, start_params):
+                    if qparam != sparam:
+                        break
+                else:
+                    arg_found = True
+                if not arg_found:
+                    continue
+
+                added_params = []
+                for nparam in needed_params:
+                    for idx, qparam in enumerate(qarg.params):
+                        if qparam.name == nparam.name:
+                            if qparam != nparam:
+                                added_params.append(nparam)
+                                qarg.params[idx] = nparam
+                            break
+                    else:
+                        added_params.append(nparam)
+                        qarg.params.append(nparam)
+
+                if added_params:
+                    self.dirty = True
+                    print 'Added parameters to -%s %s entry of qemu args' % (type, ':'.join(p.name for p in start_params))
+                else:
+                    print 'Ensured -%s %s entry of qemu args is correct' % (type, ':'.join(p.name for p in start_params))
+                return
+
+        self.dirty = True
+        print 'Adding missing argument -%s %s to qemu args' % (type, ':'.join(p.name for p in start_params))
+        self.qargs.append(self.QemuArgument(type=type, params=list(start_params) + list(needed_params)))
+
+    def append_set_option(self, options):
+        if not self.dirty:
+            return
+
+        args = []
+        for arg in self.qargs:
+            if arg.type:
+                args.append('-%s' % arg.type)
+            params = []
+            for param in arg.params:
+                if param.value:
+                    params.append('%s%s=%s' % (param.prefix, param.name, param.value))
+                else:
+                    params.append('%s%s' % (param.prefix, param.name))
+            if params:
+                args.append(','.join(params))
+        options.append(('Fine-tuning qemu args', ['-args', subprocess.list2cmdline(args)]))
+
 def enable_macos_support(vm):
     ensure_values = [
         ('bios', 'ovmf', 'MacOS should run using OVMF BIOS, please change the settings using Proxmox Options tab'),
         ('vga', 'std', 'MacOS should run using Standard VGA display, please change the settings using Proxmox Hardware tab'),
+        ('ostype', 'other', 'MacOS should be set up as "Other" guest OS type, please change the settings using Proxmox Options tab'),
     ]
     machine_target = 'pc-q35-2.11'
     cpu_target = 'Penryn'
@@ -990,7 +1088,7 @@ def enable_macos_support(vm):
 
     found_problems = 0
     for name, value, message in ensure_values:
-        if vm.config[name][0] != value:
+        if vm.config.get(name, [None])[0] != value:
             with PrintEscControl(YELLOW_COLOR):
                 print message
             found_problems += 1
@@ -1000,12 +1098,12 @@ def enable_macos_support(vm):
         return
 
     options = []
-    if vm.config['machine'][0] != machine_target:
+    if vm.config.get('machine', [None])[0] != machine_target:
         options.append(('Changing machine to "%s"' % machine_target, ['-machine', machine_target]))
     else:
         print 'Correct machine type already specified'
 
-    if vm.config['cpu'][0] != cpu_target:
+    if vm.config.get('cpu', [None])[0] != cpu_target:
         options.append(('Changing CPU to "%s"' % cpu_target, ['-cpu', cpu_target]))
     else:
         print 'Correct CPU already specified'
@@ -1030,19 +1128,22 @@ def enable_macos_support(vm):
                 print 'Either drop network connectivity or add a E1000 network adapter and re-run %s' % os.path.basename(sys.argv[0])
                 return
 
-    oskey, apple_smc_index = None, -1
-    for idx, arg in enumerate(vm.config.get('args', [])):
-        subargs = arg.split(',')
-        if subargs[0] != 'isa-applesmc':
-            continue
-        apple_smc_index = idx
-        params = {}
-        for subarg in subargs[1:]:
-            if '=' in subarg:
-                key, value = subarg.split('=', 1)
-                params[key] = value
-        oskey = params.get('osk')
-        break
+    qemu_args = QemuArgsManager.parse_args(vm)
+    oskey = None
+
+    for qarg in qemu_args.qargs:
+        if qarg.type == 'device':
+            for param in qarg.params:
+                if param.name == 'isa-applesmc':
+                    break
+            else:
+                # not an AppleSMC device
+                continue
+            for param in qarg.params:
+                if param.name == 'osk':
+                    oskey = param.value
+                    break
+            break
 
     print
     print_title('Manage MacOS OSK')
@@ -1055,8 +1156,19 @@ def enable_macos_support(vm):
         print 'https://www.nicksherlock.com/2017/10/installing-macos-high-sierra-on-proxmox-5/'
         oskey = raw_input('\nMacOS OSK: ')
 
-    # TODO: implement -args adding to "options"
-    # TODO: implement "options" application
+    qemu_args.ensure_arg(type='device', start_params='isa-applesmc', needed_params='osk=%s' % oskey)
+    qemu_args.ensure_arg(type='smbios', start_params='', needed_params='type=2')
+    qemu_args.ensure_arg(type='cpu', start_params=cpu_target, needed_params='kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on')
+
+    qemu_args.append_set_option(options)
+
+    if options:
+        changes = []
+        for message, command in options:
+            print message
+            changes.extend(command)
+        apply_qm_options(vm, changes)
+    print 'MacOS enabling complete'
 
 def stage2():
     print_title('\nDevices available for passing through:')
