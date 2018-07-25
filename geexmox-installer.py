@@ -320,6 +320,10 @@ class QemuConfig:
     def __init__(self, vmid):
         self.vmid = vmid
         self.__config = {}
+
+    @property
+    def empty(self):
+        return not self.__config
     
     def parse_line(self, line):
         key, value = line.split(':', 1)
@@ -361,7 +365,7 @@ class QemuConfig:
     def validate(self):
         # check that OVMF bios has EFI disk
         issues = []
-        if self['bios'][0] == 'ovmf':
+        if self.get('bios', [None])[0] == 'ovmf':
             if not self.get('efidisk', {}).get('0', None):
                 issues.append(self.ValidateResult(
                         problem='Missing EFI disk with OVMF bios selected',
@@ -370,15 +374,15 @@ class QemuConfig:
 
         # check that if we're passing something thru we use OVMF and don't use ballooning
         if self.get('hostpci'):
-            if self['bios'][0] != 'ovmf':
+            if self.get('bios', [None])[0] != 'ovmf':
                 issues.append(self.ValidateResult(
                         problem='Passing throught devices on non-OVMF bios is unsupported',
-                        solution='Switch BIOS to OVMF using ProxMox Options menu',
+                        solution='Switch BIOS to OVMF using ProxMox Options menu or do not pass PCI devices to it',
                         have_to_stop=True))
-            if self.get('balloon') and self['balloon'][0] != '0':
+            if self.get('balloon', [None])[0] != '0':
                 issues.append(self.ValidateResult(
                         problem='Cannot enable memory ballooning when passing through PCI devices',
-                        solution='Disable memory ballooning using ProxMox Hardware menu',
+                        solution='Disable memory ballooning using ProxMox Hardware menu or do not pass PCI devices to it',
                         have_to_stop=True))
             if len(self['hostpci']) > MAX_PASSTHROUGH:
                 issues.append(self.ValidateResult(
@@ -440,7 +444,7 @@ class VmNode:
         return '%(vmid)s %(name)s %(status)s %(mem)s %(bootdisk)s %(pid)s' % subst
 
     def parse_config(self):
-        print 'Getting config for "%s"...' % self.name
+        print '%s config for "%s"...' % ('Getting' if self.config.empty else 'Refreshing', self.name)
         self.config = QemuConfig(self.vmid)
         lines = call_cmd(['qm', 'config', str(self.vmid)]).splitlines()
         for line in lines:
@@ -877,8 +881,8 @@ def list_and_validate_vms():
 
     if have_to_stop:
         with PrintEscControl(BOLD):
-            print '\nPlease fix issues above and re-run %s to continue configuring' % os.path.basename(sys.argv[0])
-            #XXX sys.exit(1)
+            print '\nPlease fix issues above and refresh VM list to continue configuring'
+            return []
 
     return vms
 
@@ -952,7 +956,7 @@ def choose_devs_for_passthrough(vm):
 
     return to_set, new_config
 
-def edit_vm_config(vm, edit_callback, apply_callback):
+def edit_vm_config(vm, config_name, edit_callback, apply_callback):
     while True:
         how_to, new_config = edit_callback(vm)
         if not how_to:
@@ -963,10 +967,13 @@ def edit_vm_config(vm, edit_callback, apply_callback):
         issues = new_config.validate()
         if not issues:
             break
-        with PrintEscControl(YELLOW_COLOR):
-            print 'Cannot apply configuration changes, issues detected'
+        with PrintEscControl(YELLOW_COLOR + BOLD):
+            print '\nCannot apply configuration changes, issues detected:'
         for issue in issues:
-            print issue.problem
+            print '*', issue.problem
+        print
+        if not prompt_yesno('Try editing machine "%s" %s settings again' % (vm.name, config_name)):
+            return
 
     if how_to:
         return apply_callback(vm, how_to)
@@ -977,7 +984,7 @@ def apply_qm_options(vm, options):
     vm.parse_config()
 
 def select_devs_for_passthrough(vm):
-    return edit_vm_config(vm, choose_devs_for_passthrough, apply_qm_options)
+    return edit_vm_config(vm, 'passthrough', choose_devs_for_passthrough, apply_qm_options)
 
 class QemuArgsManager:
     QemuArgument = collections.namedtuple('QemuArgument', 'type params')
@@ -1078,23 +1085,28 @@ class QemuArgsManager:
 
 def enable_macos_support(vm):
     ensure_values = [
-        ('bios', 'ovmf', 'MacOS should run using OVMF BIOS, please change the settings using Proxmox Options tab'),
-        ('vga', 'std', 'MacOS should run using Standard VGA display, please change the settings using Proxmox Hardware tab'),
-        ('ostype', 'other', 'MacOS should be set up as "Other" guest OS type, please change the settings using Proxmox Options tab'),
+        ('bios', 'ovmf', 'VM should use "OVMF" BIOS, please change the settings using Proxmox Options tab and remember to add EFI disk in Hardware tab'),
+        ('vga', 'std', 'VM should have "Standard VGA" display, please change the settings using Proxmox Hardware tab'),
+        ('ostype', 'other', 'Guest OS type should be set up to "Other", please change the settings using Proxmox Options tab'),
+        ('balloon', '0', 'VM should not use memory ballooning, please change the settings using Proxmox Hardware tab'),
     ]
     machine_target = 'pc-q35-2.11'
     cpu_target = 'Penryn'
     net_target = 'e1000-82545em'
 
-    found_problems = 0
+    found_problems = [] 
     for name, value, message in ensure_values:
         if vm.config.get(name, [None])[0] != value:
-            with PrintEscControl(YELLOW_COLOR):
-                print message
-            found_problems += 1
-    if found_problems > 0:
-        with PrintEscControl(YELLOW_COLOR):
-            print 'After fixing the %s please re-run %s' % ('issues' if found_problems > 1 else 'issue', os.path.basename(sys.argv[0]))
+            found_problems.append(message)
+    if found_problems:
+        issue_word = 'issues' if len(found_problems) > 1 else 'issue'
+        with PrintEscControl(YELLOW_COLOR + BOLD):
+            print '\nCannot enable MacOS support, %s detected:' % issue_word
+        for problem in found_problems:
+            print '*', problem
+
+        with PrintEscControl(YELLOW_COLOR + BOLD):
+            print '\nAfter fixing the %s please refresh VM list' % issue_word
         return
 
     options = []
@@ -1125,7 +1137,11 @@ def enable_macos_support(vm):
                 break
         else:
             with PrintEscControl(YELLOW_COLOR):
-                print 'Either drop network connectivity or add a E1000 network adapter and re-run %s' % os.path.basename(sys.argv[0])
+                print 'Supported network adapter not found. Please fix the issue using Proxmox Hardware tab by either:'
+                print ' * removing all network adapters'
+                print ' * adding a Intel E1000 network adapter'
+                print ' * changing existing adapter to Intel E1000'
+                print 'And then please refresh VM list'
                 return
 
     qemu_args = QemuArgsManager.parse_args(vm)
@@ -1148,7 +1164,7 @@ def enable_macos_support(vm):
     print
     print_title('Manage MacOS OSK')
     if oskey:
-        print 'Current OS key: "%s"' % oskey
+        print 'Current OS key: %s' % oskey
         if not prompt_yesno('Is current OS key correct'):
             oskey = None
     if not oskey:
@@ -1190,18 +1206,27 @@ def stage2():
     while True:
         print
 
-        print_title('Virtual Machines present:')
+        if vms:
+            print_title('Virtual Machines present:')
 
-        for index, vm in enumerate(vms):
-            print '%2d. %s' % (index+1, vm.name)
+            for index, vm in enumerate(vms):
+                print '%2d. %s' % (index+1, vm.name)
 
-        print
+            print
 
-        val = prompt_int('Enter the VM index to edit (0 - exit): ', 0, len(vms))
-        if val == 0:
+        try:
+            val = prompt_int('Enter the VM index to edit (0 - refresh, Ctrl-C - quit): ', 0, len(vms))
+        except KeyboardInterrupt:
+            with PrintEscControl(GREEN_COLOR):
+                print '\nGoodbye! Have fun using Geexmox-tuned Proxmox node!\n'
             break
 
+        if val == 0:
+            vms = list_and_validate_vms()
+            continue
+
         vm = vms[val - 1]
+        vm.parse_config()
 
         while True:
             with PrintEscControl(BOLD):
