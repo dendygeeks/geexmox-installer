@@ -587,6 +587,13 @@ def inject_geexmox_overrides():
         download(url, target)
 
 def disable_pve_enterprise(verbose=True):
+    logos = [
+        ('bootsplash_dg.jpg', '/usr/share/qemu-server/bootsplash.jpg'),
+        ('logo-128_dg.png', '/usr/share/pve-manager/images/logo-128.png'),
+        ('proxmox_logo_dg.png', '/usr/share/pve-manager/images/proxmox_logo.png'),
+    ]
+    logo_start_url = 'https://dendygeeks.github.io/geexmox-pve-overrides/logos/'
+
     for fname in glob.glob('/etc/apt/sources.list.d/*'):
         with open(fname) as conf:
             contents = conf.read().splitlines()
@@ -623,6 +630,9 @@ def disable_pve_enterprise(verbose=True):
         if verbose:
             print 'Patched out the nag'
 
+    for logo_name, logo_target in logos:
+        if os.path.exists(logo_target):
+            download(logo_start_url + logo_name, logo_target)
 
 def install_proxmox():
     # installing ProxMox by following official guide:
