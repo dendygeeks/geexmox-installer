@@ -64,9 +64,53 @@ class ElephantArt:
 
     ANSI_ESC_COLOR = '\x1b[40;38;5;%dm%s'
     ANSI_RESET_COLOR = '\x1b[0m'
-
+    
     @classmethod
     def get_mascot(cls):
+        image = cls.unpack_mascot()
+        try:
+            terminal_width = int(subprocess.check_output(['tput', 'cols']).strip()) - 1
+        except (subprocess.CalledProcessError, ValueError):
+            pass
+        else:
+            text_width = sum(len(text) for (color, text) in image[0])
+            if text_width > terminal_width:
+                strip_left = int(text_width - terminal_width) / 2
+                strip_right = text_width - terminal_width - strip_left
+                stripped = []
+                for row in image:
+                    remain = strip_left
+                    while row and remain > 0:
+                        if len(row[0][1]) < remain:
+                            remain -= len(row[0][1])
+                            del row[0]
+                        else:
+                            row[0] = (row[0][0], row[0][1][remain:])
+                            break
+                    remain = strip_right
+                    while row and remain > 0:
+                        if len(row[-1][1]) < remain:
+                            remain -= len(row[-1][1])
+                            del row[-1]
+                        else:
+                            row[-1] = (row[-1][0], row[-1][1][:-remain])
+                            break
+                    stripped.append(row)
+                image = stripped
+        
+        result = []
+        for img_row in image:
+            row = []
+            for color, text in img_row:
+                row.append(cls.ANSI_ESC_COLOR % (color, text))
+            result.append(''.join(row))
+        result.append(cls.ANSI_RESET_COLOR)
+
+        return '\n'.join(result)
+
+
+    @classmethod
+    def unpack_mascot(cls):
         import base64
         import zipfile
         import tarfile
@@ -86,7 +130,7 @@ class ElephantArt:
             with tarfile.open(fileobj=buf) as tf:
                 data = tf.extractfile('ascii-ansi.bin').read()
 
-        result = []
+        image = []
         for line in data.splitlines():
             row, offset = [], 0
             line = line.strip()
@@ -99,11 +143,9 @@ class ElephantArt:
                 offset += struct.calcsize(fmt)
                 if size < 0:
                     text = text[0] * (-size)
-                row.append(cls.ANSI_ESC_COLOR % (color, text))
-            result.append(''.join(row))
-        result.append(cls.ANSI_RESET_COLOR)
-
-        return '\n'.join(result)
+                row.append((color, text))
+            image.append(row)
+        return image
 
 class PrintEscControl:
     current = [RESET_ALL]
