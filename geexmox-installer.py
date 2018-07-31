@@ -13,6 +13,7 @@ import traceback
 import glob
 import collections
 import copy
+import stat
 
 ROOT_EUID = 0
 
@@ -590,7 +591,13 @@ def inject_geexmox_overrides():
     call_cmd(['apt-get', 'install', '-y', 'apt-transport-https'], need_output=False)
     for url, target in APT_CONFIGS:
         download(url, target)
+    if os.path.islink('/usr/local/sbin/geexmox'):
+        os.unlink('/usr/local/sbin/geexmox')
 
+    os.symlink(os.path.abspath(__file__), '/usr/local/sbin/geexmox')
+    stats = os.stat(os.path.abspath(__file__))
+    os.chmod(os.path.abspath(__file__), stats.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        
 def disable_pve_enterprise(verbose=True):
     logos = [
         ('bootsplash_dg.jpg', '/usr/share/qemu-server/bootsplash.jpg'),
