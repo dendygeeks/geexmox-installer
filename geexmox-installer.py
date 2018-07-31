@@ -388,12 +388,12 @@ class QemuConfig:
         for dev in self.get_hostpci_devices():
             if not dev.can_passthru():
                 issues.append(self.ValidateResult(
-                        problem='Cannot pass through device at %s: not driven by a kernel module' % item,
+                        problem='Cannot pass through device at %s: not driven by a kernel module' % dev.slot,
                         solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
                         have_to_stop=True))
             if not dev.is_driven_by_vfio():
                 issues.append(self.ValidateResult(
-                        problem='Bad driver for device at %s, should be %s for passing through' % (item, PciDevice.VFIO_DRIVER),
+                        problem='Bad driver for device at %s, should be %s for passing through' % (dev.slot, PciDevice.VFIO_DRIVER),
                         solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
                         have_to_stop=True))
 
@@ -635,28 +635,63 @@ def disable_pve_enterprise(verbose=True):
         if os.path.exists(logo_target):
             download(logo_start_url + logo_name, logo_target)
 
+ADDRESS_RE = re.compile(r'\s*inet\s+(\d+\.\d+\.\d+\.\d+).*scope\s+global.*')
 def install_proxmox():
     # installing ProxMox by following official guide:
     # https://pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_Stretch
     hostname = subprocess.check_output(['hostname']).strip()
     hostname_ip = subprocess.check_output(['hostname', '--ip-address']).strip()
-    with open('/etc/hosts') as hosts:
-        for line in hosts:
-            line = line.split('#')[0].strip()
-            if not line:
-                continue
-            if line.split()[0] == hostname_ip:
-                print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s is present in /etc/hosts' % \
-                        {'b': BOLD, 'r': RESET_ALL, 'h': hostname, 'ip': hostname_ip}
+    
+    ip_config = subprocess.check_output(['ip', 'address']).strip()
+    real_ip = None
+    patch_hosts = False
+    for line in ip_config.splitlines():
+        match = ADDRESS_RE.match(line)
+        if match:
+            if match.group(1) == hostname_ip:
                 break
-        else:
-            print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s not present in /etc/hosts' % \
-                    {'b': BOLD, 'r': RESET_ALL, 'h': hostname, 'ip': hostname_ip}
-            print 'It should be there for ProxMox installation to succeed.'
-            if prompt_yesno('Add %s entry to /etc/hosts' % hostname):
-                with open('/etc/hosts', 'a+') as hosts:
-                    hosts.write('\n%(ip)s\t%(host)s\t\t# automagically added by %(prog)s\n' %
-                            {'ip': hostname_ip, 'host': hostname, 'prog': os.path.basename(sys.argv[0])})
+            if real_ip is None:
+                real_ip = match.group(1)
+    else:
+        with PrintEscControl(YELLOW_COLOR + BOLD):
+            print '"hostname --ip-address"  is not assigned to any valid network interface'
+        if real_ip is not None:
+            if prompt_yesno('Assign "%s" as "%s" address instead' % (real_ip, hostname)):
+                hostname_ip = real_ip
+                patch_hosts = True
+
+    if not patch_hosts:
+        with open('/etc/hosts') as hosts:
+            for line in hosts:
+                line = line.split('#')[0].strip()
+                if not line:
+                    continue
+                if line.split()[0] == hostname_ip:
+                    print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s is present in /etc/hosts' % \
+                            {'b': BOLD, 'r': RESET_ALL, 'h': hostname, 'ip': hostname_ip}
+                    break
+            else:
+                patch_hosts = True
+
+    if patch_hosts:
+        print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s not present in /etc/hosts' % \
+                {'b': BOLD, 'r': RESET_ALL, 'h': hostname, 'ip': hostname_ip}
+        print 'It should be there for ProxMox installation to succeed.'
+        if prompt_yesno('Add %s entry to /etc/hosts' % hostname):
+            with open('/etc/hosts') as hosts:
+                lines = hosts.readlines()
+            with open('/etc/hosts', 'w') as hosts:
+                for line in lines:
+                    no_comment = line.split('#')[0].strip()
+                    if not no_comment:
+                        continue
+                    if re.search(r'\s+%s(\s+|$)' % re.escape(hostname), no_comment):
+                        hosts.write('#%(line)s # automagically commented by %(prog)s\n' % 
+                                {'line': line.rstrip(), 'prog': os.path.basename(sys.argv[0])})
+                    else:
+                        hosts.write(line)
+                hosts.write('\n%(ip)s\t%(host)s\t\t# automagically added by %(prog)s\n' %
+                        {'ip': hostname_ip, 'host': hostname, 'prog': os.path.basename(sys.argv[0])})
 
     print 'Adding ProxMox repo and key...'
     with open('/etc/apt/sources.list.d/pve-install-repo.list', 'w') as pve:
