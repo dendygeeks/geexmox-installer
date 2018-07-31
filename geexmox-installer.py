@@ -367,6 +367,11 @@ class QemuConfig:
                         problem='Passing throught devices on non-OVMF bios is unsupported',
                         solution='Switch BIOS to OVMF using ProxMox Options menu or do not pass PCI devices to it',
                         have_to_stop=True))
+            if 'q35' not in self.get('machine', [''])[0]:
+                issues.append(self.ValidateResult(
+                        problem='Passing through devices on OVMF requires machine to be q35-descendant',
+                        solution='Please fix qemu config for %s vmid' % self.vmid,
+                        have_to_stop=True))
             if self.get('balloon', [None])[0] != '0':
                 issues.append(self.ValidateResult(
                         problem='Cannot enable memory ballooning when passing through PCI devices',
@@ -1004,6 +1009,10 @@ def choose_devs_for_passthrough(vm):
 
     if to_delete:
         to_set.extend(['-delete', ','.join('hostpci%s' % num for num in to_delete)])
+
+    if passthru and 'q35' not in vm.config.get('machine', [''])[0]:
+        to_set.extend(['-machine', 'q35'])
+        new_config['machine'] = ['q35']
 
     return to_set, new_config
 
