@@ -587,16 +587,26 @@ def get_module_depends(modname):
     return []
 
 def inject_geexmox_overrides():
+    sbin_command = '/usr/local/sbin/geexmox'
+    if os.path.abspath(__file__) != sbin_command:
+        print '\nInstalling "%s" command...' % sbin_command
+        if os.path.exists(sbin_command):
+            os.unlink(sbin_command)
+
+        os.symlink(os.path.abspath(__file__), sbin_command)
+        stats = os.stat(os.path.abspath(__file__))
+        os.chmod(os.path.abspath(__file__), stats.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    with open(__file__, 'rb') as myself:
+        content = myself.read()
+    if '\r' in content:
+        with open(__file__, 'wb') as myself:
+            myself.write(content.replace('\r', ''))
+
     print '\nMaking sure apt has https transport...'
     call_cmd(['apt-get', 'install', '-y', 'apt-transport-https'], need_output=False)
     for url, target in APT_CONFIGS:
         download(url, target)
-    if os.path.islink('/usr/local/sbin/geexmox'):
-        os.unlink('/usr/local/sbin/geexmox')
-
-    os.symlink(os.path.abspath(__file__), '/usr/local/sbin/geexmox')
-    stats = os.stat(os.path.abspath(__file__))
-    os.chmod(os.path.abspath(__file__), stats.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         
 def disable_pve_enterprise(verbose=True):
     logos = [
