@@ -491,13 +491,20 @@ def print_devices(enabler, show_disabled=True):
     
     return printed_devs
 
-def download(url, target):
+def download_internal(url, target):
     print 'Downloading %s as %s' % (url, target)
     try:
         with contextlib.closing(urllib.urlopen(url)) as page:
             with open(target, 'wb') as f:
                 f.write(page.read())
     except IOError:
+        raise IOError("Can't download the file %s as %s" % (url, target))
+
+def download_wget(url, target):
+    print 'Downloading %s as %s' % (url, target)
+    try:
+        call_cmd(['wget', url, '-O', target], need_output=False)
+    except subprocess.CalledProcessError:
         raise IOError("Can't download the file %s as %s" % (url, target))
 
 def print_title(msg):
@@ -1255,7 +1262,7 @@ def stage2():
                 break
             ops[opt - 1][1](vm)
 
-if __name__ == '__main__':
+def main():
     if '--help' in sys.argv or '-h' in sys.argv:
         sys.exit('''Usage: %s [--debug] [--reconf]
 
@@ -1264,7 +1271,14 @@ Starts installation if node is not running a ProxMox kernel.
 
     --reconf: forces installation start
     --debug:  shows error stacktraces
+    --wget:   use wget for downloading stuff (works around some issues with proxies)
     --help:   shows this text''' % sys.argv[0])
+
+    global download
+    if '--wget' in sys.argv:
+        download = download_wget
+    else:
+        download = download_internal
 
     try:
         if os.geteuid() != ROOT_EUID:
@@ -1292,3 +1306,5 @@ Starts installation if node is not running a ProxMox kernel.
             if '--debug' in sys.argv:
                 traceback.print_exc()
 
+if __name__ == '__main__':
+    main()
