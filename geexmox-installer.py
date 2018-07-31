@@ -1085,6 +1085,23 @@ class QemuArgsManager:
             result.append(cls.QemuArgument(type=current_type, params=[]))
         return cls(result)
 
+    def remove_arg(self, type, start_params):
+        if isinstance(start_params, str):
+            start_params = self.parse_param_str(start_params)
+        to_remove = []
+        for idx, qarg in enumerate(self.qargs):
+            if qarg.type == type:
+                for qparam, sparam in zip(qarg.params, start_params):
+                    if qparam != sparam:
+                        break
+                else:
+                    to_remove.append(idx)
+        if to_remove:
+            print 'Removing all -%s %s entries from qemu args' % (type, ':'.join(p.name for p in start_params))
+            for idx in reversed(to_remove):
+                del self.qargs[idx]
+            self.dirty = True
+        
     def ensure_arg(self, type, start_params, needed_params):
         if isinstance(start_params, str):
             start_params = self.parse_param_str(start_params)
@@ -1169,14 +1186,14 @@ def enable_macos_support(vm):
             print '\nAfter fixing the %s please refresh VM list' % issue_word
         return
 
-    options = []
+    actions = []
     if vm.config.get('machine', [None])[0] != machine_target:
-        options.append(('Changing machine to "%s"' % machine_target, ['-machine', machine_target]))
+        actions.append(('Changing machine to "%s"' % machine_target, ['-machine', machine_target]))
     else:
         print 'Correct machine type already specified'
 
     if vm.config.get('cpu', [None])[0] != cpu_target:
-        options.append(('Changing CPU to "%s"' % cpu_target, ['-cpu', cpu_target]))
+        actions.append(('Changing CPU to "%s"' % cpu_target, ['-cpu', cpu_target]))
     else:
         print 'Correct CPU already specified'
 
@@ -1192,7 +1209,7 @@ def enable_macos_support(vm):
                 else:
                     new_value = [net_target]
                 new_value += value[1:]
-                options.append(('Changing network adapter to "%s"' % net_target,
+                actions.append(('Changing network adapter to "%s"' % net_target,
                                 ['-net%s' % number, ','.join(new_value)]))
                 break
         else:
@@ -1236,16 +1253,121 @@ def enable_macos_support(vm):
     qemu_args.ensure_arg(type='smbios', start_params='', needed_params='type=2')
     qemu_args.ensure_arg(type='cpu', start_params=cpu_target, needed_params='kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on')
 
-    qemu_args.append_set_option(options)
+    qemu_args.append_set_option(actions)
 
-    if options:
+    if actions:
         changes = []
-        for message, command in options:
+        for message, command in actions:
             print message
             changes.extend(command)
         apply_qm_options(vm, changes)
     print 'MacOS enabling complete'
 
+def compute_win7_passthrough_hack(vm):
+    qemu_args = QemuArgsManager.parse_args(vm)
+    device_arg_start = QemuArgsManager.parse_param_str('vfio-pci,host,id=hostpci,bus=pcie.0')
+    hacked_devs = []
+    for qarg in qemu_args.qargs:
+        if qarg.type == 'device':
+            for qparam, eparam in zip(list(qarg.params) + [None] * 10, device_arg_start):
+                if qparam.name != eparam.name or \
+                        (eparam.value and (not qparam.value or not qparam.value.startswith(eparam.value))):
+                    break
+            else:
+                hacked_devs.append(qarg)
+    
+    if hacked_devs:
+        message = 'Convert from hacked to normal passthrough'
+    elif vm.config.get('hostpci'):
+        message = 'Convert from normal passthrough to hacked'
+    else:
+        print 'No devices were passed through, nothing to do'
+        return [], vm.config
+        
+    if not prompt_yesno(message):
+        return [], vm.config
+
+    actions = []
+    to_set = []
+    new_config = copy.deepcopy(vm.config)
+
+    if hacked_devs:
+        parsed = {}
+        for qarg in hacked_devs:
+            qemu_args.remove_arg(qarg.type, qarg.params)
+            
+            host_slot, hostpci_num = None, None
+            for param in qarg.params:
+                if param.name == 'host':
+                    host_slot = param.value
+                elif param.name == 'id':
+                    hostpci_num = param.value.split('.')[0].replace('hostpci', '')
+            assert host_slot and hostpci_num
+            parsed.setdefault(hostpci_num, []).append(host_slot)
+            
+        if not new_config.get('hostpci'):
+            new_config['hostpci'] = QemuConfig.QemuSubvalueWrapper()
+        for hostpci_num, host_slot in parsed.items():
+            if len(host_slot) > 1:
+                host_slot = host_slot[0].split('.')[0]
+            else:
+                host_slot = host_slot[0]
+            to_set.extend(['-hostpci%s' % hostpci_num, '%s,pcie=1,x-vga=on' % host_slot])
+            new_config['hostpci'][hostpci_num] = QemuConfig.QemuConfigEntry(to_set[-1]) 
+        
+        if to_set:
+            actions.append(('Set hostpci entries', to_set))
+    else:
+        grouped = {}
+        for hostpci_num, passthru_cfg in vm.config['hostpci'].items():
+            for dev in vm.config.translate_hostpci_to_devices(passthru_cfg):
+                grouped.setdefault(dev.slot.split('.')[0], []).append((hostpci_num, dev))
+        for slot_start, dev_list in list(grouped.items()):
+            for _, dev in dev_list:
+                if dev.class_id == PciDevice.VGA_CONTROLLER:
+                    break
+            else:
+                del grouped[slot_start]
+        to_delete = set()
+        guest_pci_addr = 0x10
+        for dev_list in grouped.values():
+            dev_list = sorted(dev_list, key=lambda entry: int(entry[1].slot.split('.')[1]))
+            first_hostpci_num = dev_list[0][0]
+            for idx, (hostpci_num, dev) in enumerate(dev_list):
+                to_delete.add(hostpci_num)
+                del new_config['hostpci'][hostpci_num]
+                qemu_args.ensure_arg(type='device',
+                                     start_params='vfio-pci,host=%s' % dev.slot,
+                                     needed_params='id=hostpci%(hostpci_num)s.%(pci_idx)s,bus=pcie.0,addr=0x%(guest_pci_addr)x.%(pci_idx)s%(multi)s' % 
+                                            {'hostpci_num': first_hostpci_num,
+                                             'pci_idx': idx,
+                                             'guest_pci_addr': guest_pci_addr,
+                                             'multi': ',multifunction=on' if idx == 0 else ''})
+            guest_pci_addr += 1
+
+        if to_delete:
+            to_set.extend(['-delete', ','.join('hostpci%s' % num for num in to_delete)])
+            actions.append(('Remove VGA-related hostpci entries', to_set))
+        cpu_type = vm.config.get('cpu', ['kvm64'])[0]
+        qemu_args.ensure_arg(type='cpu', start_params=cpu_type,
+                             needed_params='hv_time,kvm=off,hv_vendor_id=DendyGeeks,-hypervisor')
+        if vm.config.get('vga', [None])[0] != 'none':
+            actions.append(('Set emulated VGA to none', ['-vga', 'none']))
+            new_config['vga'] = ['none']
+
+    qemu_args.append_set_option(actions)
+    if actions:
+        changes = []
+        for message, command in actions:
+            print message
+            changes.extend(command)
+        return changes, new_config
+
+    return [], vm.config
+
+def toggle_win7_passthrough_hack(vm):
+    return edit_vm_config(vm, 'win7 passthrough hacks', compute_win7_passthrough_hack, apply_qm_options)
+    
 def stage2():
     print_title('\nDevices available for passing through:')
     passthru = print_devices(lambda dev: dev.is_driven_by_vfio())
@@ -1295,8 +1417,10 @@ def stage2():
             ops = [
                 ('Show passed through PCI devices', show_passthrough_devs),
                 ("Select PCI devices for passing through", select_devs_for_passthrough),
-                ("Enable macOS support for the VM", enable_macos_support)
+                ("Enable macOS support for the VM", enable_macos_support),
             ]
+            if vm.config.get('ostype', [None])[0] == 'win7':
+                ops.append(('Toggle passthrough hack for Windows 7', toggle_win7_passthrough_hack))
             for index, (op, _) in enumerate(ops):
                 print "%2d. %s" % (index+1, op)
 
