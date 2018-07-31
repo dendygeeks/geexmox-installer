@@ -583,6 +583,8 @@ def get_module_depends(modname):
     return []
 
 def inject_geexmox_overrides():
+    print '\nMaking sure apt has https transport...'
+    call_cmd(['apt-get', 'install', '-y', 'apt-transport-https'], need_output=False)
     for url, target in APT_CONFIGS:
         download(url, target)
 
@@ -610,25 +612,26 @@ def disable_pve_enterprise(verbose=True):
                 conf.write('\n'.join(contents))
 
     libjs = r'/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js'
-    if verbose:
-        print 'Patching %s to remove nag...' % libjs
-    with open(libjs) as jsfile:
-        text = jsfile.read().splitlines()
-    for idx, line in enumerate(text):
-        if line.strip() == "if (data.status !== 'Active') {":
-            text[idx] = line.replace("data.status !== 'Active'", "false")
-            patched = True
-            break
-    else:
-        patched = False
+    if os.path.exists(libjs):
         if verbose:
-            with PrintEscControl(YELLOW_COLOR):
-                print 'Cannot find the nag, maybe already patched'
-    if patched:
-        with open(libjs, 'w') as jsfile:
-            jsfile.write('\n'.join(text))
-        if verbose:
-            print 'Patched out the nag'
+            print 'Patching %s to remove nag...' % libjs
+        with open(libjs) as jsfile:
+            text = jsfile.read().splitlines()
+        for idx, line in enumerate(text):
+            if line.strip() == "if (data.status !== 'Active') {":
+                text[idx] = line.replace("data.status !== 'Active'", "false")
+                patched = True
+                break
+        else:
+            patched = False
+            if verbose:
+                with PrintEscControl(YELLOW_COLOR):
+                    print 'Cannot find the nag, maybe already patched'
+        if patched:
+            with open(libjs, 'w') as jsfile:
+                jsfile.write('\n'.join(text))
+            if verbose:
+                print 'Patched out the nag'
 
     for logo_name, logo_target in logos:
         if os.path.exists(logo_target):
