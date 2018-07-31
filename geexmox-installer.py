@@ -19,25 +19,15 @@ ROOT_EUID = 0
 # Console ESC flags
 BOLD = '\x1b[1m'
 DIMMED = '\x1b[2m'
-# Reset console ESC flags
-RESET_BOLD = '\x1b[21m'
-RESET_DIMMED = '\x1b[22m'
 
 # Console ESC colors
 RED_COLOR = '\x1b[31m'
 LIGHT_RED_COLOR = '\x1b[91m'
 YELLOW_COLOR = '\x1b[93m'
 GREEN_COLOR = '\x1b[92m'
-DEFAULT_COLOR = '\x1b[39m'
 
-RESET_TABLE = {
-    RED_COLOR: DEFAULT_COLOR,
-    LIGHT_RED_COLOR: DEFAULT_COLOR,
-    YELLOW_COLOR: DEFAULT_COLOR,
-    GREEN_COLOR: DEFAULT_COLOR,
-    BOLD: RESET_BOLD,
-    DIMMED: RESET_DIMMED,
-}
+# Reset all console ESC flags
+RESET_ALL = '\x1b[0m'
 
 APT_CONFIGS = [
     ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/preferences.d/geexmox',
@@ -71,7 +61,7 @@ class ElephantArt:
     3j5ItzkyL2IHPEQpwWFOXsPrQLkTdNxCgWcC8SzqIuPX3u2G3i4KYyqKcLOVv3IjowIBTbEdXrsGDEL/xdyRThQkMxvvLEA=
     '''
 
-    ANSI_ESC_COLOR = '\x1b[40;1;38;5;%dm%s'
+    ANSI_ESC_COLOR = '\x1b[40;38;5;%dm%s'
     ANSI_RESET_COLOR = '\x1b[0m'
 
     @classmethod
@@ -115,28 +105,26 @@ class ElephantArt:
         return '\n'.join(result)
 
 class PrintEscControl:
-    @staticmethod
-    def __switch_color(color):
+    current = [RESET_ALL]
+    
+    @classmethod
+    def __switch_color(cls):
+        color = ''.join(cls.current)
         for handle in (sys.stdout, sys.stderr):
             handle.write(color)
             handle.flush()
 
-    def __init__(self, begin_seq, end_seq=None):
+    def __init__(self, begin_seq):
         self.begin_seq = begin_seq
-        if end_seq is not None:
-            self.end_seq = end_seq
-        else:
-            end_seq = []
-            for color in reversed(begin_seq.split('\x1b')):
-                if not color:
-                    continue
-                end_seq.append(RESET_TABLE['\x1b' + color])
-            self.end_seq = ''.join(end_seq)
 
     def __enter__(self, *a, **kw):
-        self.__switch_color(self.begin_seq)
+        self.current.append(self.begin_seq)
+        self.__switch_color()
+
     def __exit__(self, *a, **kw):
-        self.__switch_color(self.end_seq)
+        prev_color = self.current.pop()
+        assert prev_color == self.begin_seq
+        self.__switch_color()
 
 class CalledProcessError(subprocess.CalledProcessError):
     def __init__(self, returncode, cmd, output=None, errout=None):
@@ -479,14 +467,17 @@ def print_devices(enabler, show_disabled=True):
             if enabler(dev):
                 printed_devs.append(dev)
                 if not title_shown:
-                    print BOLD + label + RESET_BOLD
+                    with PrintEscControl(BOLD):
+                        print label
                     title_shown = True
                 print "%2d. %s" % (len(printed_devs), dev)
             elif show_disabled:
                 if not title_shown:
-                    print BOLD + label + RESET_BOLD
+                    with PrintEscControl(BOLD):
+                        print label
                     title_shown = True
-                print '%s    %s%s' % (RED_COLOR, dev, DEFAULT_COLOR)
+                with PrintEscControl(RED_COLOR):
+                    print '    %s' % dev
     
         if title_shown:
             print
@@ -649,11 +640,11 @@ def install_proxmox():
                 continue
             if line.split()[0] == hostname_ip:
                 print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s is present in /etc/hosts' % \
-                        {'b': BOLD, 'r': RESET_BOLD, 'h': hostname, 'ip': hostname_ip}
+                        {'b': BOLD, 'r': RESET_ALL, 'h': hostname, 'ip': hostname_ip}
                 break
         else:
             print 'Current host %(b)s%(h)s%(r)s ip address %(b)s%(ip)s%(r)s not present in /etc/hosts' % \
-                    {'b': BOLD, 'r': RESET_BOLD, 'h': hostname, 'ip': hostname_ip}
+                    {'b': BOLD, 'r': RESET_ALL, 'h': hostname, 'ip': hostname_ip}
             print 'It should be there for ProxMox installation to succeed.'
             if prompt_yesno('Add %s entry to /etc/hosts' % hostname):
                 with open('/etc/hosts', 'a+') as hosts:
