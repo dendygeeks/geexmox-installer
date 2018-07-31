@@ -1393,8 +1393,9 @@ def compute_win7_passthrough_hack(vm):
             dev_list = sorted(dev_list, key=lambda entry: int(entry[1].slot.split('.')[1]))
             first_hostpci_num = dev_list[0][0]
             for idx, (hostpci_num, dev) in enumerate(dev_list):
-                to_delete.add(hostpci_num)
-                del new_config['hostpci'][hostpci_num]
+                if hostpci_num not in to_delete:
+                    to_delete.add(hostpci_num)
+                    del new_config['hostpci'][hostpci_num]
                 qemu_args.ensure_arg(type='device',
                                      start_params='vfio-pci,host=%s' % dev.slot,
                                      needed_params='id=hostpci%(hostpci_num)s.%(pci_idx)s,bus=pcie.0,addr=0x%(guest_pci_addr)x.%(pci_idx)s%(multi)s' % 
