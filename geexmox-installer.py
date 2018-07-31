@@ -1322,7 +1322,7 @@ def enable_macos_support(vm):
         apply_qm_options(vm, changes)
     print 'MacOS enabling complete'
 
-def compute_win7_passthrough_hack(vm):
+def compute_pci_bridge_passthrough_hack(vm):
     qemu_args = QemuArgsManager.parse_args(vm)
     device_arg_start = QemuArgsManager.parse_param_str('vfio-pci,host,id=hostpci,bus=pcie.0')
     hacked_devs = []
@@ -1425,8 +1425,8 @@ def compute_win7_passthrough_hack(vm):
 
     return [], vm.config
 
-def toggle_win7_passthrough_hack(vm):
-    return edit_vm_config(vm, 'win7 passthrough hacks', compute_win7_passthrough_hack, apply_qm_options)
+def toggle_pci_bridge_passthrough_hack(vm):
+    return edit_vm_config(vm, 'pci bridge passthrough hacks', compute_pci_bridge_passthrough_hack, apply_qm_options)
     
 def stage2():
     print_title('\nDevices available for passing through:')
@@ -1478,9 +1478,8 @@ def stage2():
                 ('Show passed through PCI devices', show_passthrough_devs),
                 ("Select PCI devices for passing through", select_devs_for_passthrough),
                 ("Enable macOS support for the VM", enable_macos_support),
+                ('Toggle PCI bridge passthrough hack (useful for Windows 7)', toggle_pci_bridge_passthrough_hack),
             ]
-            if vm.config.get('ostype', [None])[0] == 'win7':
-                ops.append(('Toggle passthrough hack for Windows 7', toggle_win7_passthrough_hack))
             for index, (op, _) in enumerate(ops):
                 print "%2d. %s" % (index+1, op)
 
