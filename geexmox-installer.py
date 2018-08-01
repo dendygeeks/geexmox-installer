@@ -437,13 +437,13 @@ class QemuConfig:
             if not dev.can_passthru():
                 issues.append(self.ValidateResult(
                         problem='Cannot pass through device at %s: not driven by a kernel module' % dev.slot,
-                        solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
-                        have_to_stop=True))
+                        solution='Run "%s --reconf", select correct devices and reboot OR do bot pass this device through' % os.path.basename(sys.argv[0]),
+                        have_to_stop=False))
             if not dev.is_driven_by_vfio():
                 issues.append(self.ValidateResult(
                         problem='Bad driver for device at %s, should be %s for passing through' % (dev.slot, PciDevice.VFIO_DRIVER),
-                        solution='Run "%s --reconf", select correct devices and reboot' % os.path.basename(sys.argv[1]),
-                        have_to_stop=True))
+                        solution='Run "%s --reconf", select correct devices and reboot OR do not pass this device through' % os.path.basename(sys.argv[0]),
+                        have_to_stop=False))
 
         # check that if '-cpu' is present in 'args' it matches global 'cpu'
         if self.get('args') and self.get('cpu'):
@@ -632,7 +632,7 @@ def inject_geexmox_overrides():
     sbin_command = '/usr/local/sbin/geexmox'
     if os.path.abspath(__file__) != sbin_command:
         print '\nInstalling "%s" command...' % sbin_command
-        if os.path.exists(sbin_command):
+        if os.path.exists(sbin_command) or os.path.lexists(sbin_command):
             os.unlink(sbin_command)
 
         os.symlink(os.path.abspath(__file__), sbin_command)
