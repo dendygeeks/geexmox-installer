@@ -30,12 +30,12 @@ GREEN_COLOR = '\x1b[92m'
 # Reset all console ESC flags
 RESET_ALL = '\x1b[0m'
 
-APT_CONFIGS = [
-    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/preferences.d/geexmox',
-     '/etc/apt/preferences.d/geexmox'),
-    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/sources.list.d/geexmox.list',
-     '/etc/apt/sources.list.d/geexmox.list')
-]
+#APT_CONFIGS = [
+#    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/preferences.d/geexmox',
+#     '/etc/apt/preferences.d/geexmox'),
+#    ('https://dendygeeks.github.io/geexmox-pve-overrides/etc/apt/sources.list.d/geexmox.list',
+#     '/etc/apt/sources.list.d/geexmox.list')
+#]
 
 MAX_PASSTHROUGH = 4
 
@@ -647,8 +647,8 @@ def inject_geexmox_overrides():
 
     print '\nMaking sure apt has https transport...'
     call_cmd(['apt-get', 'install', '-y', 'apt-transport-https'], need_output=False)
-    for url, target in APT_CONFIGS:
-        download(url, target)
+#    for url, target in APT_CONFIGS:
+#        download(url, target)
         
 def disable_pve_enterprise(verbose=True):
     logos = [
@@ -780,6 +780,29 @@ def install_proxmox():
     if prompt_yesno('ProxMox recommends installing postfix, install', default_answer=False):
         call_cmd(['apt-get', 'install', '-y', 'postfix'], need_output=False)
     print
+
+    print 'Compiling the patched PVE kernel and other overrides...'
+    os.chdir('geexmox-pve-overrides')
+    call_cmd(['bash', 'prepare.sh'], need_output=False)
+    call_cmd(['make', '-j8'], need_output=False)
+    print 'Installing the newly built packages over the default PVE ones...'
+    os.chdir('apt-repo')
+    call_cmd(['bash', 'update-debs.sh'], need_output=False)
+    call_cmd(['bash', 'add-apt-repos.sh'], need_output=False)
+    os.chdir('result')
+    call_cmd(['bash', '-c', 'dpkg -i *.deb'], need_output=False)
+    package_name = call_cmd(['bash', '-c', 'ls *kernel*geexmox*.deb'])
+    version_search = re.search('pve-kernel-(.*-pve-geexmox)*', package_name)
+    if version_search:
+        version = version_search.group(1)
+        print 'Setting the default boot kernel to ' + str(version)
+        menuentry_line = call_cmd(['bash', '-c', "grep 'menuentry' /boot/grub/grub.cfg | " + 'grep "' + version + "'" + '"' + " | nl -v 0"]) 
+        index = menuentry_line.strip().split('\t')[0]
+        #call_cmd(['grub-set-default', str(index)])
+        with open('/etc/default/grub.d/geexmox-boot.cfg', 'w') as pve:
+            pve.write('GRUB_DEFAULT=' + index + '\n')
+        call_cmd(['update-grub'], need_output=False)
+
     if no_enterprise:
         disable_pve_enterprise(verbose=False)
 

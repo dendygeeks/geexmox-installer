@@ -1,0 +1,3 @@
+[submodule "geexmox-pve-overrides"]
+	path = geexmox-pve-overrides
+	url = ../geexmox-pve-overrides.git
