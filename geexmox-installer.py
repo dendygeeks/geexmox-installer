@@ -649,7 +649,7 @@ def inject_geexmox_overrides():
     call_cmd(['apt-get', 'install', '-y', 'apt-transport-https'], need_output=False)
 #    for url, target in APT_CONFIGS:
 #        download(url, target)
-        
+
 def disable_pve_enterprise(verbose=True):
     logos = [
         ('bootsplash_dg.jpg', '/usr/share/qemu-server/bootsplash.jpg'),
@@ -781,10 +781,10 @@ def install_proxmox():
         call_cmd(['apt-get', 'install', '-y', 'postfix'], need_output=False)
     print
 
-    print 'Compiling the patched PVE kernel and other overrides...'
-    os.chdir('geexmox-pve-overrides')
-    call_cmd(['bash', 'prepare.sh'], need_output=False)
-    call_cmd(['make', '-j8'], need_output=False)
+            
+
+    #call_cmd(['bash', 'prepare.sh'], need_output=False)
+    #call_cmd(['make'], need_output=False)
     print 'Installing the newly built packages over the default PVE ones...'
     os.chdir('apt-repo')
     call_cmd(['bash', 'update-debs.sh'], need_output=False)
@@ -930,8 +930,19 @@ def stage1():
     if CpuVendor.os_collect() != CpuVendor.INTEL:
         with PrintEscControl(YELLOW_COLOR):
            sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
-    
-    inject_geexmox_overrides() 
+
+    os.chdir('geexmox-pve-overrides')
+    packages_found = False
+    if os.path.isdir("apt-repo/result"):
+        for file in os.listdir("apt-repo/result"):
+            if file.endswith(".deb"):
+                packages_found = True
+                print "Package found: " + file
+    if not packages_found:
+        raise Exception("You have to compile the PVE overrides first.\nGo to the geexmox-pve-overrides directory and run make as an ordinary user and then restart geexmox-installer.py")
+    os.chdir("..")
+
+    inject_geexmox_overrides()
     install_proxmox()
 
     print_title('PCI devices present:')
@@ -1084,7 +1095,7 @@ def choose_devs_for_passthrough(vm):
                 to_delete.remove(number)
             xvga = ',x-vga=on' if dev.class_id == PciDevice.VGA_CONTROLLER else ''
             to_set.extend(['-hostpci%s' % number, '%s,pcie=1%s' % (dev.slot, xvga)])
-            new_config['hostpci'][number] = QemuConfig.QemuConfigEntry(to_set[-1]) 
+            new_config['hostpci'][number] = QemuConfig.QemuConfigEntry(to_set[-1])
             with PrintEscControl(GREEN_COLOR):
                 print dev
         print
