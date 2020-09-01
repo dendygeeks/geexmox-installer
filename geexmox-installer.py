@@ -656,8 +656,8 @@ def inject_geexmox_overrides():
                 packages_found = True
                 print "Package found: " + file
     if not packages_found:
-        raise Exception("Now you have to compile the PVE overrides first.\nGo to the geexmox-pve-overrides directory and run make as an ordinary user and then restart geexmox-installer.py")
-    os.chdir("..")
+        raise Exception("You have to compile the PVE overrides first.\nGo to the geexmox-pve-overrides directory and run make as an ordinary user and then restart geexmox-installer.py")
+    #os.chdir("..")
 
     #call_cmd(['bash', 'prepare.sh'], need_output=False)
     #call_cmd(['make'], need_output=False)
@@ -667,20 +667,38 @@ def inject_geexmox_overrides():
     call_cmd(['bash', 'add-apt-repos.sh'], need_output=False)
     os.chdir('result')
     call_cmd(['bash', '-c', 'dpkg -i *.deb'], need_output=False)
-    package_name = call_cmd(['bash', '-c', 'ls *kernel*geexmox*.deb'])
-    version_search = re.search('pve-kernel-(.*-pve-geexmox)*', package_name)
-    if version_search:
-        version = version_search.group(1)
-        print 'Setting the default boot kernel to ' + str(version)
-        menuentry_line = call_cmd(['bash', '-c', "grep 'menuentry' /boot/grub/grub.cfg | " + 'grep "' + version + "'" + '"' + " | nl -v 0"]) 
-        index = menuentry_line.strip().split('\t')[0]
-        #call_cmd(['grub-set-default', str(index)])
-        with open('/etc/default/grub.d/geexmox-boot.cfg', 'w') as pve:
-            pve.write('GRUB_DEFAULT=' + index + '\n')
-        call_cmd(['update-grub'], need_output=False)
+    #package_name = call_cmd(['bash', '-c', 'ls *kernel*geexmox*.deb'])
+    #version_search = re.search('pve-kernel-(.*-pve-geexmox)*', package_name)
+    #if version_search:
+    #    version = version_search.group(1)
+    #    print 'Setting the default boot kernel to ' + str(version)
+    #    menuentry_line = call_cmd(['bash', '-c', 'grep "$menuentry_id_option" /boot/grub/grub.cfg | ' + 'grep "' + version + '"']) 
+    #    menuentry_id_search=re.search("\$menuentry_id_option ('.*')", menuentry_line)
+    #    menuentry_id = menuentry_id_search.group(1)
+    #    print 'GRUB menuentry id option is ' + menuentry_id
 
-    if no_enterprise:
-        disable_pve_enterprise(verbose=False)
+        #call_cmd(['grub-set-default', str(index)])
+
+    grub_text = []
+    update_grub_config = False
+    with open('/etc/grub.d/10_linux') as grub_conf:
+        for line in grub_conf:
+            if "vmlinuz-* " in line:
+                line = line.replace("vmlinuz-*", "vmlinuz-*-geexmox")
+                update_grub_config=True
+            elif "vmlinux-* " in line:
+                line = line.replace("vmlinux-*", "vmlinux-*-geexmox")
+                update_grub_config=True
+            grub_text.append(line)
+
+    print 'Patching grub updater to ignore all kernels except geexmox...'
+    with open('/etc/grub.d/10_linux', 'w') as grub_conf:
+        grub_conf.write(''.join(grub_text))
+    call_cmd(['update-grub'], need_output=False)
+
+
+#    if no_enterprise:
+#        disable_pve_enterprise(verbose=False)
 
 
 #    for url, target in APT_CONFIGS:
@@ -795,9 +813,9 @@ def install_proxmox():
 
     print 'Adding ProxMox repo and key...'
     with open('/etc/apt/sources.list.d/pve-install-repo.list', 'w') as pve:
-        pve.write('deb [arch=amd64] http://download.proxmox.com/debian/pve stretch pve-no-subscription\n')
-    download('http://download.proxmox.com/debian/proxmox-ve-release-5.x.gpg',
-            '/etc/apt/trusted.gpg.d/proxmox-ve-release-5.x.gpg')
+        pve.write('deb [arch=amd64] http://download.proxmox.com/debian/pve buster pve-no-subscription\n')
+    download('http://download.proxmox.com/debian/proxmox-ve-release-6.x.gpg',
+            '/etc/apt/trusted.gpg.d/proxmox-ve-release-6.x.gpg')
     
     no_enterprise = prompt_yesno('Remove PVE Enterprise configs and nag warnings', default_answer=False)
     if no_enterprise:
