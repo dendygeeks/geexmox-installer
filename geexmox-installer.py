@@ -647,6 +647,42 @@ def inject_geexmox_overrides():
 
     print '\nMaking sure apt has https transport...'
     call_cmd(['apt-get', 'install', '-y', 'apt-transport-https'], need_output=False)
+
+    os.chdir('geexmox-pve-overrides')
+    packages_found = False
+    if os.path.isdir("apt-repo/result"):
+        for file in os.listdir("apt-repo/result"):
+            if file.endswith(".deb"):
+                packages_found = True
+                print "Package found: " + file
+    if not packages_found:
+        raise Exception("Now you have to compile the PVE overrides first.\nGo to the geexmox-pve-overrides directory and run make as an ordinary user and then restart geexmox-installer.py")
+    os.chdir("..")
+
+    #call_cmd(['bash', 'prepare.sh'], need_output=False)
+    #call_cmd(['make'], need_output=False)
+    print 'Installing the newly built packages over the default PVE ones...'
+    os.chdir('apt-repo')
+    call_cmd(['bash', 'update-debs.sh'], need_output=False)
+    call_cmd(['bash', 'add-apt-repos.sh'], need_output=False)
+    os.chdir('result')
+    call_cmd(['bash', '-c', 'dpkg -i *.deb'], need_output=False)
+    package_name = call_cmd(['bash', '-c', 'ls *kernel*geexmox*.deb'])
+    version_search = re.search('pve-kernel-(.*-pve-geexmox)*', package_name)
+    if version_search:
+        version = version_search.group(1)
+        print 'Setting the default boot kernel to ' + str(version)
+        menuentry_line = call_cmd(['bash', '-c', "grep 'menuentry' /boot/grub/grub.cfg | " + 'grep "' + version + "'" + '"' + " | nl -v 0"]) 
+        index = menuentry_line.strip().split('\t')[0]
+        #call_cmd(['grub-set-default', str(index)])
+        with open('/etc/default/grub.d/geexmox-boot.cfg', 'w') as pve:
+            pve.write('GRUB_DEFAULT=' + index + '\n')
+        call_cmd(['update-grub'], need_output=False)
+
+    if no_enterprise:
+        disable_pve_enterprise(verbose=False)
+
+
 #    for url, target in APT_CONFIGS:
 #        download(url, target)
 
@@ -781,30 +817,6 @@ def install_proxmox():
         call_cmd(['apt-get', 'install', '-y', 'postfix'], need_output=False)
     print
 
-            
-
-    #call_cmd(['bash', 'prepare.sh'], need_output=False)
-    #call_cmd(['make'], need_output=False)
-    print 'Installing the newly built packages over the default PVE ones...'
-    os.chdir('apt-repo')
-    call_cmd(['bash', 'update-debs.sh'], need_output=False)
-    call_cmd(['bash', 'add-apt-repos.sh'], need_output=False)
-    os.chdir('result')
-    call_cmd(['bash', '-c', 'dpkg -i *.deb'], need_output=False)
-    package_name = call_cmd(['bash', '-c', 'ls *kernel*geexmox*.deb'])
-    version_search = re.search('pve-kernel-(.*-pve-geexmox)*', package_name)
-    if version_search:
-        version = version_search.group(1)
-        print 'Setting the default boot kernel to ' + str(version)
-        menuentry_line = call_cmd(['bash', '-c', "grep 'menuentry' /boot/grub/grub.cfg | " + 'grep "' + version + "'" + '"' + " | nl -v 0"]) 
-        index = menuentry_line.strip().split('\t')[0]
-        #call_cmd(['grub-set-default', str(index)])
-        with open('/etc/default/grub.d/geexmox-boot.cfg', 'w') as pve:
-            pve.write('GRUB_DEFAULT=' + index + '\n')
-        call_cmd(['update-grub'], need_output=False)
-
-    if no_enterprise:
-        disable_pve_enterprise(verbose=False)
 
 def ensure_vfio(devices):
     need_update_initramfs = False
@@ -931,19 +943,8 @@ def stage1():
         with PrintEscControl(YELLOW_COLOR):
            sys.stderr.write('Non-Intel CPUs are not fully supported by GeexMox. Pull requests are welcome! :)\n')
 
-    os.chdir('geexmox-pve-overrides')
-    packages_found = False
-    if os.path.isdir("apt-repo/result"):
-        for file in os.listdir("apt-repo/result"):
-            if file.endswith(".deb"):
-                packages_found = True
-                print "Package found: " + file
-    if not packages_found:
-        raise Exception("You have to compile the PVE overrides first.\nGo to the geexmox-pve-overrides directory and run make as an ordinary user and then restart geexmox-installer.py")
-    os.chdir("..")
-
-    inject_geexmox_overrides()
     install_proxmox()
+    inject_geexmox_overrides()
 
     print_title('PCI devices present:')
 
